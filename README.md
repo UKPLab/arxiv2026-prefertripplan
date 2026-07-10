@@ -1,116 +1,249 @@
-<p  align="center">
+<p align="center">
   <img src='logo.png' width='200'>
 </p>
 
-# arxiv2026_prefertripplan
+# PreferTripPlan
 [![Arxiv](https://img.shields.io/badge/Arxiv-YYMM.NNNNN-red?style=flat-square&logo=arxiv&logoColor=white)](https://put-here-your-paper.com)
 [![License](https://img.shields.io/github/license/UKPLab/arxiv2026-prefertripplan)](https://opensource.org/licenses/Apache-2.0)
-[![Python Versions](https://img.shields.io/badge/Python-3.9-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
-[![CI](https://github.com/UKPLab/arxiv2026-prefertripplan/actions/workflows/main.yml/badge.svg)](https://github.com/UKPLab/arxiv2026-prefertripplan/actions/workflows/main.yml)
+[![Python Versions](https://img.shields.io/badge/Python-3.10-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 
-This is the official template for new Python projects at UKP Lab. It was adapted for the needs of UKP Lab from the excellent [python-project-template](https://github.com/rochacbruno/python-project-template/) by [rochacbruno](https://github.com/rochacbruno).
+**PreferTripPlan** is a benchmark for evaluating language-model travel planners under structured, multi-paradigm user preferences and persona-driven drift. It extends the [TravelPlanner](https://osu-nlp-group.github.io/TravelPlanner/) test split with 1000 preference-augmented queries covering **8 preference paradigms** (Atomic, Composite, Numeric, Conditional, Lexicographic, Compensatory, Temporal, Scoped) and a controlled **persona drift** protocol (aligned / omission / inversion) that decouples the traveler's stated persona from their in-query preferences.
 
-It should help you start your project and give you continuous status updates on the development through [GitHub Actions](https://docs.github.com/en/actions).
+> **Abstract:** Existing agentic travel-planning benchmarks focus on hard constraints (budget, cuisine, room type) and reward planners that satisfy the constraints regardless of *how* the user actually reasons about tradeoffs. Real travelers rank, compensate, condition, and time-bound their preferences — and their stated persona is often a partial or noisy signal for the plan they actually want. **PreferTripPlan** targets that gap. Every query carries (i) a resolved preference in one of 8 well-typed paradigms with structured predicates and quantifier scopes, (ii) a natural-language persona rendered from a curated trait bank, and (iii) a persona drift mode that either aligns, omits, or inverts a persona trait relative to the trip's preference. Feasibility is gated end-to-end — tour selection, pool floors, temporal-scope buckets, transport-budget, min-nights lodging, and vacuous-satisfaction guards — so every admitted record poses a genuine trade-off decision. The result is a benchmark that tests whether a planner can (a) parse structured preferences beyond simple filters and (b) navigate a mismatch between what the user's persona suggests and what the query actually asks for.
 
-> **Abstract:** The study of natural language processing (NLP) has gained increasing importance in recent years, with applications ranging from machine translation to sentiment analysis. Properly managing Python projects in this domain is of paramount importance to ensure reproducibility and facilitate collaboration. The template provides a structured starting point for projects and offers continuous status updates on development through GitHub Actions. Key features include a basic setup.py file for installation, packaging, and distribution, documentation structure using mkdocs, testing structure using pytest, code linting with pylint, and entry points for executing the program with basic CLI argument parsing. Additionally, the template incorporates continuous integration using GitHub Actions with jobs to check, lint, and test the project, ensuring robustness and reliability throughout the development process.
+Contact person: [Md Imbesat Hassan Rizvi](mailto:imbesat.rizvi@tu-darmstadt.de)
 
-Contact person: [Federico Tiblias](mailto:federico.tiblias@tu-darmstadt.de) 
+[UKP Lab](https://www.ukp.tu-darmstadt.de/) | [TU Darmstadt](https://www.tu-darmstadt.de/)
 
-[UKP Lab](https://www.ukp.tu-darmstadt.de/) | [TU Darmstadt](https://www.tu-darmstadt.de/
-)
+Don't hesitate to send us an e-mail or report an issue if something is broken or if you have further questions.
 
-Don't hesitate to send us an e-mail or report an issue, if something is broken (and it shouldn't be) or if you have further questions.
+
+## Dataset at a glance
+
+| Property | Value |
+|---|---|
+| Records | 1000 (984 augmented + 16 non-augmentable pass-through) |
+| Difficulty split | easy 348 · medium 333 · hard 319 |
+| Persona drift per level | aligned 30% · omission 35% · inversion 35% |
+| Pairing (medium/hard) | independent 60% · overlapping 40% |
+| Overlap subtypes | competing 25% · non-competing 75% |
+| Preference paradigms | 8 (Atomic, Composite, Numeric, Conditional, Lexicographic, Compensatory, Temporal, Scoped) |
+| Temporal sub-operators | 9 (always, sometime, within, atmost_once, sometime_before, sometime_after, always_within, hold_during, hold_after) |
+| Preference bank size | ~150 curated entries with `example_values` + rationales |
 
 
 ## Getting Started
 
-> **DO NOT CLONE OR FORK**
+Clone the repo and set up a Python 3.10 virtual environment:
 
-If you want to set up this template:
-
-1. Request a repository on UKP Lab's GitHub by following the standard procedure on the wiki. It will install the template directly. Alternatively, set it up in your personal GitHub account by clicking **[Use this template](https://github.com/rochacbruno/python-project-template/generate)**.
-2. Wait until the first run of CI finishes. Github Actions will commit to your new repo with a "✅ Ready to clone and code" message.
-3. Delete optional files: 
-    - If you don't need automatic documentation generation, you can delete folder `docs`, file `.github\workflows\docs.yml` and `mkdocs.yml`
-    - If you don't want automatic testing, you can delete folder `tests` and file `.github\workflows\tests.yml`
-    - If you do not wish to have a project page, delete folder `static` and files `.nojekyll`, `index.html`
-4. Prepare a virtual environment:
 ```bash
+git clone https://github.com/UKPLab/arxiv2026-prefertripplan.git
+cd arxiv2026-prefertripplan
 python -m venv .venv
 source .venv/bin/activate
-pip install .
-pip install -r requirements-dev.txt # Only needed for development
+pip install -r requirements.txt
 ```
-5. Adapt anything else (for example this file) to your project. 
 
-6. Read the file [ABOUT_THIS_TEMPLATE.md](ABOUT_THIS_TEMPLATE.md)  for more information about development.
+The TravelPlanner CSV / JSONL sources live under `database/` (accommodations, restaurants, attractions, flights, distance matrix, city↔state mapping). The base test queries are `database/travelplanner-test.jsonl` and are used verbatim — the augmenter only ADDS fields, never mutates the original query facts.
+
 
 ## Usage
 
-### Using the classes
+The benchmark is generated in three sequential stages. Each stage reads the previous stage's output and writes to `prefertripplan.jsonl` in place; the sidecar files (`llm_nl_cache.jsonl`, `analysis/`) are optional.
 
-To import classes/methods of `arxiv2026_prefertripplan` from inside the package itself you can use relative imports: 
+### Stage 1 — Preference augmentation
 
-```py
-from .base import BaseClass # Notice how I omit the package name
-
-BaseClass().something()
-```
-
-To import classes/methods from outside the package (e.g. when you want to use the package in some other project) you can instead refer to the package name:
-
-```py
-from arxiv2026_prefertripplan import BaseClass # Notice how I omit the file name
-from arxiv2026_prefertripplan.subpackage import SubPackageClass # Here it's necessary because it's a subpackage
-
-BaseClass().something()
-SubPackageClass().something()
-```
-
-### Using scripts
-
-This is how you can use `arxiv2026_prefertripplan` from command line:
+Attaches one (easy) or two (medium/hard) resolved preferences to every query, drawn from `preference_bank.json` and balanced across paradigms, sub-paradigms, bank ids, pairing types, and overlap subtypes. Every admitted record passes an end-to-end feasibility gate: candidate cities have viable pools, the ordered tour has a within-budget transport plan, every temporal-scope group has ≥1 matching item, no ScopedPreference names a city outside the query's state, and the reference `solution_information` block draws from a feasibility-filtered pool.
 
 ```bash
-$ python -m arxiv2026_prefertripplan
+python3 augment_preferences.py \
+    --bank preference_bank.json \
+    --queries database/travelplanner-test.jsonl \
+    --db database \
+    --out prefertripplan.jsonl \
+    --seed 20260601
 ```
+
+Targeted regeneration of specific queries (preserving the rest) is supported via `--regen '712,713:overlapping:competing'`.
+
+### Stage 2 — Templated persona + query generation
+
+Builds the traceable persona from the trait bank, applies per-query drift (aligned / omission / inversion), and emits a templated natural-language `nl_persona` + `nl_query`. This stage is deterministic and offline (no LLM calls).
+
+```bash
+python3 generate_personas.py
+```
+
+### Stage 3 — LLM natural-language rendering (optional, resumable)
+
+Rewrites the templated persona and query into fluent traveler prose while preserving every structured predicate value, scope tag, and drift semantic. Supports three backends and a sidecar `(qid, kind)`-keyed cache so runs are resumable and can be scoped to a sample of qids:
+
+```bash
+# Anthropic default
+python3 render_llm_nl.py --backend anthropic --model claude-haiku-4-5-20251001
+
+# OpenAI (or OpenAI-compatible endpoint via --openai-base-url)
+python3 render_llm_nl.py --backend openai --model gpt-5.4-mini --workers 8
+
+# vLLM in-process, single-pass batched inference
+python3 render_llm_nl.py --backend vllm-offline --model meta-llama/Llama-3.1-8B-Instruct
+
+# Smoke test on a curated qid list
+python3 render_llm_nl.py --sample-qids data-augmentation/representative_qids.txt
+```
+
+Progress + ETA are shown live via tqdm (falls back to a plain `\r`-updated line if tqdm isn't installed).
+
 
 ### Expected results
 
-After running the experiments, you should expect the following results:
+After Stage 2 you have `prefertripplan.jsonl` with 1000 records. Each augmented record carries:
 
-(Feel free to describe your expected results here...)
+| Field | Type | Description |
+|---|---|---|
+| `query_id`, `org`, `dest`, `days`, `date`, `budget`, `people_number`, `local_constraint` | — | Original TravelPlanner query facts (unchanged) |
+| `level` | `easy` / `medium` / `hard` | Difficulty; drives paradigm count and pairing |
+| `preferences` | list of dicts | Resolved preferences with structured predicate template, `bank_id`, `trace`, and `rationale` |
+| `preference_traces` | list of strings | Full trace per pref: `<paradigm>[.<subtype>]:<bank_id>` |
+| `pairing_type` | `single` / `independent` / `overlapping` | Relationship between the two prefs (medium/hard) |
+| `pairing_subtype` | `null` / `competing` / `non_competing` | Overlap sub-tag |
+| `budget_original`, `budget_multiplier`, `budget` | numbers | Original budget and any escalation applied to keep the record feasible (cap 1.5×) |
+| `persona` | dict | Trait-populated persona with Travel Style / Food / Hobbies / Lifestyle / Preferred Destinations / Dislikes |
+| `persona_drift_mode` | `aligned` / `omission` / `inversion` | Persona-vs-preference relationship |
+| `persona_trace` | list | Full source provenance for the persona traits |
+| `nl_persona`, `nl_query` | strings | Templated natural-language rendering |
+| `feasibility_metadata` | dict | Full audit trail: candidate cities, selected tour, per-city pool counts, per-check breakdown, transport cost, day↔city↔phase↔week-group tie-ins, solution + reference information |
 
-### Parameter description
+Stage 3 adds:
 
-* `x, --xxxx`: This parameter does something nice
+| Field | Description |
+|---|---|
+| `llm_nl_persona` | LLM-rewritten fluent persona introduction |
+| `llm_nl_query` | LLM-rewritten fluent trip-request message, drift-aware |
 
-* ...
+Optional distribution report:
 
-* `z, --zzzz`: This parameter does something even nicer
+```bash
+python3 analyze_distributions.py
+# → analysis/distribution_analysis.txt  +  analysis/plots/*.png
+```
+
+
+### Key CLI parameters
+
+**`augment_preferences.py`**
+- `--bank`: preference-bank JSON path (default: `preference_bank.json`)
+- `--queries`: base TravelPlanner test JSONL (default: `database/travelplanner-test.jsonl`)
+- `--db`: database directory holding accommodations/restaurants/attractions/flights CSVs
+- `--out`: output JSONL (default: `prefertripplan.jsonl`)
+- `--seed`: RNG seed (default: 20260601)
+- `--regen`: comma-separated `id[:pairing[:subtype]]` targets for surgical regeneration
+
+**`render_llm_nl.py`**
+- `--backend`: `anthropic` / `openai` / `vllm-offline`
+- `--model`: model name (backend-specific default)
+- `--workers`: concurrent in-flight requests for API backends (default 4)
+- `--sample-qids`: restrict to a comma-list or a text file of query_ids
+- `--sample N`: restrict to the first N records (smoke test)
+
+
+## Repository layout
+
+```
+Preference-Augmentation/
+├─ augment_preferences.py     Stage-1 augmenter: bank → resolved preferences + feasibility gate
+├─ generate_personas.py       Stage-2 templated persona + query renderer
+├─ render_llm_nl.py           Stage-3 LLM NL renderer (Anthropic / OpenAI / vLLM), resumable
+├─ analyze_distributions.py   Distribution report over the augmented JSONL
+├─ preferences.py             8-paradigm preference type hierarchy + evaluators
+├─ persona_traits.py          Curated trait tables (aligned + inversion variants per field)
+├─ preference_bank.json       Human-curated bank of preference templates with example values
+├─ database/                  TravelPlanner sources (CSVs + base test queries)
+├─ analysis/                  Distribution reports and plots
+└─ data-augmentation/         Auxiliary scripts (flight DB build, query redate, curated qid list)
+```
+
+
+## Design highlights
+
+- **Feasibility as a hard invariant.** Every admitted record has (a) a coherent ordered tour where every leg has a viable transport mode under `local_constraint`, (b) transport cost ≤60% of the applied budget, (c) accommodations with `minimum_nights ≤ 3` in every stay city, (d) per-city pool floors cleared for each preference's scope group, and (e) no vacuous-satisfaction case anywhere (every scope group of every temporal operator has ≥1 matching item; `atmost_once` and ordering ops included).
+- **Temporal scope routing.** Nine temporal operators × five scope classes (`per_city`, `per_day`, `travel_phase`, `week_group`, `global`) each have a dedicated bucket enforcement — per-city individual, per-phase union, per-week-group union, per-hold-window per-city. Rationale explanations don't override the resolved scope.
+- **Cross-state city guard.** Any `Day.city` reference (in ScopedPreference scope_filters or ConditionalPreference condition/then_pref) that names a city outside the query's state is rejected upstream.
+- **Compensatory sibling distinctness.** When a paired anchor forces re-sampling of primary_ap and margin_ap on the same categorical attribute, the two slots are guaranteed to land on distinct values compatible with the paired predicate.
+- **Persona drift ≠ preference drift.** Persona traits drift independently of the query's preferences (30/35/35 aligned/omission/inversion per level) — the LLM must reconcile the two without inferring one from the other.
+- **Provenance everywhere.** `preference_traces`, `persona_trace`, `feasibility_metadata`, `solution_information`, and `reference_information` together form a self-verifying audit trail per record.
+
 
 ## Development
 
-Read the FAQs in [ABOUT_THIS_TEMPLATE.md](ABOUT_THIS_TEMPLATE.md) to learn more about how this template works and where you should put your classes & methods. Make sure you've correctly installed `requirements-dev.txt` dependencies
+### End-to-end regeneration (sequential)
+
+Every stage reads what the previous stage wrote and mutates `prefertripplan.jsonl` in place. Run the scripts in this exact order — no other invocation is required, no manual editing between stages.
+
+```bash
+# Stage 1 — Preference augmentation
+#   Reads:  preference_bank.json, database/travelplanner-test.jsonl, database/*
+#   Writes: prefertripplan.jsonl (preferences, preference_traces, pairing_type,
+#           pairing_subtype, budget_multiplier, feasibility_metadata,
+#           solution_information, reference_information)
+python3 augment_preferences.py
+
+# Stage 2 — Templated persona + query rendering (deterministic, offline)
+#   Reads:  prefertripplan.jsonl, persona_traits.py trait tables
+#   Writes: prefertripplan.jsonl (persona, persona_drift_mode, persona_trace,
+#           nl_persona, nl_query)
+python3 generate_personas.py
+
+# Stage 3 (optional) — LLM NL rendering, resumable via llm_nl_cache.jsonl
+#   Reads:  prefertripplan.jsonl, llm_nl_cache.jsonl (if present)
+#   Writes: prefertripplan.jsonl (llm_nl_persona, llm_nl_query),
+#           llm_nl_cache.jsonl (append-only)
+python3 render_llm_nl.py --backend anthropic
+
+# Optional — Distribution / balance audit
+#   Reads:  prefertripplan.jsonl
+#   Writes: analysis/distribution_analysis.txt, analysis/plots/*.png
+python3 analyze_distributions.py
+```
+
+### Targeted / partial re-runs
+
+- **Regenerate a subset of queries** without touching the rest (Stage 1):
+  ```bash
+  python3 augment_preferences.py --regen '712,713:overlapping:competing,996'
+  ```
+  The listed queries are re-augmented (optionally with forced pairing / subtype); every other record is read back from `--out` verbatim.
+- **After** any Stage-1 regeneration, always re-run Stage 2 so `persona`, `persona_drift_mode`, `nl_persona`, and `nl_query` are re-derived from the fresh preferences.
+- **Stage 3 cache invalidation.** The `llm_nl_cache.jsonl` sidecar is keyed by `(qid, kind)` only — not content-hashed. If Stage 1 changed the resolved preferences for a `qid`, its old LLM NL is stale. Either delete the whole cache before the next Stage-3 run (`rm llm_nl_cache.jsonl`) or prune the affected qid lines. Persona-only entries usually survive across regens; query entries almost always need to be regenerated.
+- **Smoke test Stage 3 on a curated qid list** before a full run:
+  ```bash
+  python3 render_llm_nl.py --sample-qids data-augmentation/representative_qids.txt
+  ```
+
+### Balance / health checks
+
+- `python3 analyze_distributions.py` writes level / drift / pairing / paradigm / bank-id / entity-attribute distributions to `analysis/distribution_analysis.txt` and per-axis plots to `analysis/plots/`.
+- Every admitted record's `feasibility_metadata` block is self-verifying: `selected_tour`, `per_city_check_breakdown`, `prehoc_transport_cost` vs `transport_budget_cap`, `day_to_city` / `day_to_phase` / `day_to_week_group`, and `solution_information` are all inspectable per record without re-running the augmenter.
+
 
 ## Cite
 
 Please use the following citation:
 
 ```
-@InProceedings{smith:20xx:CONFERENCE_TITLE,
-  author    = {Smith, John},
-  title     = {My Paper Title},
-  booktitle = {Proceedings of the 20XX Conference on XXXX},
-  month     = mmm,
-  year      = {20xx},
-  address   = {Gotham City, USA},
-  publisher = {Association for XXX},
-  pages     = {XXXX--XXXX},
-  url       = {http://xxxx.xxx}
+@misc{rizvi2026prefertripplan,
+      title={A Multi-Paradigm Preference-Fidelity Benchmark for Long Horizon Planning}, 
+      author={Rizvi, Md Imbesat Hassan and Dutta, Subhabrata and Zhu, Xiaodan and Gurevych, Iryna},
+      month=jul,
+      year={2026},
+      eprint={},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={}, 
 }
 ```
 
+
 ## Disclaimer
 
-> This repository contains experimental software and is published for the sole purpose of giving additional background details on the respective publication. 
+> This repository contains experimental software and is published for the sole purpose of giving additional background details on the respective publication.
