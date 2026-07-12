@@ -257,16 +257,24 @@ PER_CITY_ALL_FLOOR = {
 # [any]-scope predicates need a much smaller floor (one candidate per
 # city suffices in principle; >1 gives the planner some choice).
 PER_CITY_ANY_FLOOR = 1
-# Compensatory paradigm uses a wider [any]-scope floor: one item per day
-# (up to 3 days at a city even in multi-city trips) -> 3 affordable items.
-# Exception: Accommodation is booked ONCE per city stay (not once per
-# day), so its Compensatory floor stays at 1.
-PER_CITY_ANY_FLOOR_COMPENSATORY: dict[str, int] = {
-    "Accommodation": 1,
-    "Restaurant":    3,
-    "Attraction":    3,
+# Compensatory paradigm: primary + margin are UNIVERSAL over primary-
+# entity items across the plan (every item lands Tier-1 or Tier-2-
+# compensated); secondary is same-day EXISTENTIAL (one qualifying
+# secondary-entity item per day suffices to compensate a Tier-2 drop).
+#
+# When primary and secondary share the same entity type, the pool needs
+# to feed both roles anyway, so the ALL / ANY split is cosmetic in that
+# case.  Keep both floors uniform at the same [all]-matched values to
+# avoid confusion -- pair admission always requires the deeper pool.
+# The role distinction remains in the semantic (surfaced in the
+# templated NL query + LLM prompt), not in the floor.
+PER_CITY_ALL_FLOOR_COMPENSATORY: dict[str, int] = {
+    "Accommodation":  1,
+    "Restaurant":     6,       # matches PER_CITY_ALL_FLOOR
+    "Attraction":     5,       # matches PER_CITY_ALL_FLOOR
     "Transportation": 1,
 }
+PER_CITY_ANY_FLOOR_COMPENSATORY: dict[str, int] = dict(PER_CITY_ALL_FLOOR_COMPENSATORY)
 
 # Trip segments (arrival to next transit) never exceed 3 days in the
 # 3/5/7-day design. An accommodation whose minimum_nights requirement
@@ -274,6 +282,26 @@ PER_CITY_ANY_FLOOR_COMPENSATORY: dict[str, int] = {
 # compatibility" check inherited from original TravelPlanner. Filter
 # such rows out of every downstream pool right at qdb-build time.
 MAX_TRIP_SEGMENT_NIGHTS = 3
+
+
+def _restore_unit_price_for_emit(items):
+    """Return a shallow-copied list of accommodation items with per-
+    person `cost` swapped back to raw `_unit_price` and the shadow
+    field removed.  Applied at every reference / solution info
+    emission site so the emitted schema matches TravelPlanner's
+    native accommodation.price convention.  Idempotent -- items
+    without a `_unit_price` shadow pass through untouched."""
+    if not items:
+        return items
+    out = []
+    for it in items:
+        if isinstance(it, dict) and "_unit_price" in it:
+            copy = dict(it)
+            copy["cost"] = copy.pop("_unit_price")
+            out.append(copy)
+        else:
+            out.append(it)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -786,11 +814,48 @@ def build_query_db(query: dict[str, Any], raw: dict[str, Any],
     # 3 days, so any lodging demanding >3 nights up front can never be
     # booked and must be dropped from the pool up front -- before any
     # other constraint or feasibility computation reads the pool.
-    accom = [a for a in raw["accommodations"]
-             if a["city"] in cities_set
-             and accom_passes_constraints(a, query)
-             and (a.get("minimum_nights") is None
-                  or a["minimum_nights"] <= MAX_TRIP_SEGMENT_NIGHTS)]
+    #
+    # Per-person effective_cost transformation (this pipeline only):
+    # accommodation `cost` in the CSV is per-unit per-night, but the
+    # augmenter's affordability heuristics (accom_per_night) are
+    # per-person.  For every accepted accommodation we shadow the raw
+    # unit price in `_unit_price` and OVERWRITE `cost` with the per-
+    # person effective cost:
+    #     effective = round_to_10(unit_price × ⌈people / max_occ⌉ / people)
+    # (matches TravelPlanner's evaluator, which sums
+    #  unit_price × ⌈people/max_occ⌉ × nights.)  All internal comparisons
+    # (predicate_holds, stats, _affordable_subset) then work in
+    # per-person space against the per-person heuristics.  The raw
+    # `_unit_price` is restored to `cost` at emit time (see
+    # _restore_unit_price_for_emit) so reference / solution info still
+    # show the CSV-native unit price -- downstream planners must
+    # normalize to per-person themselves.
+    people_number = max(int(query.get("people_number", 1) or 1), 1)
+
+    def _per_person_effective_cost(unit_price: float, max_occ_raw: Any) -> float:
+        try:
+            max_occ = int(max_occ_raw) if max_occ_raw not in (None, "") else 1
+        except (TypeError, ValueError):
+            max_occ = 1
+        if max_occ <= 0:
+            max_occ = 1
+        raw = unit_price * _math.ceil(people_number / max_occ) / people_number
+        return _round_value("Accommodation", "cost", raw)
+
+    accom: list[dict[str, Any]] = []
+    for a in raw["accommodations"]:
+        if a["city"] not in cities_set:
+            continue
+        if not accom_passes_constraints(a, query):
+            continue
+        if not (a.get("minimum_nights") is None
+                or a["minimum_nights"] <= MAX_TRIP_SEGMENT_NIGHTS):
+            continue
+        new_a = dict(a)
+        new_a["_unit_price"] = new_a["cost"]
+        new_a["cost"] = _per_person_effective_cost(
+            new_a["_unit_price"], new_a.get("maximum_occupancy"))
+        accom.append(new_a)
     rest = [r for r in raw["restaurants"]
             if r["city"] in cities_set and rest_passes_constraints(r, query)]
     attr = [a for a in raw["attractions"] if a["city"] in cities_set]
@@ -810,33 +875,12 @@ def build_query_db(query: dict[str, Any], raw: dict[str, Any],
     seg_end_set   = {seg_end}   if seg_end   else set()
     seg_mid_set   = set(seg_mid)
 
-    transp_costs: list[float] = []
-    for c in cities:
-        if c == org:
-            continue
-        # Outbound flights org -> c on start_date (leg 1)
-        transp_costs.extend(_flight_prices_for_dates(flight_prices, org, c, seg_start_set))
-        # Return flights c -> org on end_date (final leg)
-        transp_costs.extend(_flight_prices_for_dates(flight_prices, c, org, seg_end_set))
-        # Ground-transport distance proxy (date-agnostic).
-        d = distance.get((org, c)) or distance.get((c, org))
-        if d and d.get("distance_km") is not None:
-            transp_costs.append(d["distance_km"])
-    if len(cities) > 1:
-        for c1 in cities:
-            for c2 in cities:
-                if c1 == c2:
-                    continue
-                # Intra-state flight legs on the mid segmentation dates
-                # (multi-city trips only).
-                if seg_mid_set:
-                    transp_costs.extend(
-                        _flight_prices_for_dates(flight_prices, c1, c2, seg_mid_set))
-                # Driving distance between candidate cities (date-agnostic).
-                d = distance.get((c1, c2))
-                if d and d.get("distance_km") is not None:
-                    transp_costs.append(d["distance_km"])
-
+    # Note: `transp_costs` collection + Transportation.cost stats are
+    # deliberately DROPPED in this pipeline.  See EXCLUDED_BANK_IDS at
+    # the top of the file -- no preference references Transportation.cost.
+    # Aggregate transport feasibility is enforced by the tour-cost cap
+    # (TRANSPORT_BUDGET_CAP_FRAC) and picker scoring; the mixed
+    # flight-$$/km-distance stat pool is no longer needed.
     stats: dict[tuple[str, str], dict[float, float | None]] = {}
     for entity, recs, attrs in (
         ("Accommodation", accom, ["cost", "rating"]),
@@ -846,7 +890,6 @@ def build_query_db(query: dict[str, Any], raw: dict[str, Any],
         for attribute in attrs:
             vals = [r[attribute] for r in recs if r.get(attribute) is not None]
             stats[(entity, attribute)] = quantiles(vals)
-    stats[("Transportation", "cost")] = quantiles(transp_costs)
 
     # ---- Per-city pools ----
     #   pool_by_city      = filtered by hard local_constraint (used
@@ -1005,12 +1048,19 @@ def build_query_db(query: dict[str, Any], raw: dict[str, Any],
     }
 
 
+import math as _math
+
+
 def _min_leg_cost(o: str, d: str, date: str | None,
                   flight_prices: dict[tuple[str, str], list[tuple[str, float]]],
                   distance: dict[tuple[str, str], dict[str, Any]],
                   modes_allowed: set[str], people: int
                   ) -> float | None:
-    """Cheapest available cost for a single leg under `modes_allowed`.
+    """Cheapest per-leg cost for tour-picker scoring.  Retained for
+    compatibility with _pick_prehoc_tour's mode-mixed leg-scoring
+    (`_pick_ordered_tour_prehoc` still uses per-leg mode preferences to
+    order the picked tour).  Aggregate mode-exclusive costing lives in
+    `_tour_transport_cost` below.
     Flight cost scales with `people`; ground modes (self-driving / taxi)
     charge per vehicle. Returns None if no mode is feasible."""
     costs: list[float] = []
@@ -1018,14 +1068,13 @@ def _min_leg_cost(o: str, d: str, date: str | None,
         prices = [p for (dd, p) in flight_prices.get((o, d), []) if dd == date]
         if prices:
             costs.append(min(prices) * max(people, 1))
-    km = None
     d_row = distance.get((o, d)) or distance.get((d, o)) or {}
     km = d_row.get("distance_km")
     if km is not None:
         if "self-driving" in modes_allowed:
             costs.append(km * 0.05)   # osunlp cost model
         if "taxi" in modes_allowed:
-            costs.append(km * 1.00)
+            costs.append(km * 1.00 * _math.ceil(max(people, 1) / 4))
     if not costs:
         return None
     return min(costs)
@@ -1035,10 +1084,22 @@ def _tour_transport_cost(tour: list[str], org: str,
                          seg_start: str | None, seg_mid: list[str], seg_end: str | None,
                          flight_prices, distance, modes_allowed: set[str],
                          people: int) -> float | None:
-    """Total cheapest-mode cost across all legs of the ordered tour.
-    Returns None if any leg has no feasible mode under `modes_allowed`.
-    Every leg is priced independently -- no mode-exclusive constraint
-    (matches the existing per-leg _pick_ordered_tour_prehoc scoring)."""
+    """Aggregate transport cost for the pinned tour, computed
+    MODE-EXCLUSIVELY per original TravelPlanner convention (a trip picks
+    one transportation mode for the whole thing -- no per-leg switching).
+
+    Cost formulas:
+      all-Flight tour     total = SUM(min_flight_price × people) over all legs;
+                                  only viable if EVERY leg has at least one
+                                  flight on its seg-date.
+      all-taxi tour       total = SUM(distance_km × ⌈people/4⌉) over all legs;
+                                  4-people-per-taxi per TravelPlanner conv.
+      all-self-driving    total = SUM(distance_km × 0.05) over all legs.
+
+    `local_constraint.transportation` shrinks `modes_allowed`; a mode
+    missing from that set is not considered here.  Returns the min of
+    the feasible per-mode totals -- a real planner picks the cheaper
+    mode.  None if no mode is feasible for the whole tour."""
     if not tour:
         return None
     legs: list[tuple[str, str, str | None]] = [(org, tour[0], seg_start)]
@@ -1046,20 +1107,68 @@ def _tour_transport_cost(tour: list[str], org: str,
         legs.append((tour[i], tour[i + 1],
                      seg_mid[i] if i < len(seg_mid) else None))
     legs.append((tour[-1], org, seg_end))
-    total = 0.0
-    for o, d, date in legs:
-        c = _min_leg_cost(o, d, date, flight_prices, distance, modes_allowed, people)
-        if c is None:
-            return None
-        total += c
-    return total
+    people = max(people, 1)
+    taxis_needed = _math.ceil(people / 4)
+
+    def _leg_km(o: str, d: str) -> float | None:
+        row = distance.get((o, d)) or distance.get((d, o)) or {}
+        return row.get("distance_km")
+
+    # All-Flight tour.
+    all_flight: float | None = None
+    if "Flight" in modes_allowed:
+        total = 0.0
+        ok = True
+        for o, d, date in legs:
+            prices = ([p for (dd, p) in flight_prices.get((o, d), []) if dd == date]
+                      if date else [])
+            if not prices:
+                ok = False; break
+            total += min(prices) * people
+        if ok:
+            all_flight = total
+
+    # All-taxi tour.
+    all_taxi: float | None = None
+    if "taxi" in modes_allowed:
+        total = 0.0
+        ok = True
+        for o, d, _date in legs:
+            km = _leg_km(o, d)
+            if km is None:
+                ok = False; break
+            total += km * 1.00 * taxis_needed
+        if ok:
+            all_taxi = total
+
+    # All-self-driving tour.
+    all_drive: float | None = None
+    if "self-driving" in modes_allowed:
+        total = 0.0
+        ok = True
+        for o, d, _date in legs:
+            km = _leg_km(o, d)
+            if km is None:
+                ok = False; break
+            total += km * 0.05
+        if ok:
+            all_drive = total
+
+    feasible = [c for c in (all_flight, all_taxi, all_drive) if c is not None]
+    if not feasible:
+        return None
+    return min(feasible)
 
 
-# Cap on transport cost as a fraction of total budget. 30% is the design
-# allocation (see budget_heuristic); we permit up to 2× that (=60% of
-# budget) before rejecting the record as transport-infeasible, matching
-# the escalation cap used by combined_pool_ok_with_budget_adjust.
-TRANSPORT_BUDGET_CAP_FRAC = 0.60
+# Cap on transport cost as a fraction of total budget.  Lowered from
+# 0.60 to 0.50 in the data-generation pipeline (dropping
+# Transportation.cost preferences means the aggregate transport-cap gate
+# is the ONLY affordability check on transport, so tighten the ceiling).
+# 30% is the design allocation (see budget_heuristic); a 0.50 cap
+# permits up to ~1.67× the design share -- generous enough for cross-
+# country queries where flights are pricier, tight enough that
+# runaway-taxi tours (qid-809-style) still fail.
+TRANSPORT_BUDGET_CAP_FRAC = 0.50
 
 
 def _pick_prehoc_tour(candidate_cities, visit_n, org, seg_start, seg_mid, seg_end,
@@ -1316,18 +1425,50 @@ def count_matches(items: list[dict[str, Any]], entity: str, attribute: str,
 # Bank flattening                                                             #
 # --------------------------------------------------------------------------- #
 
+# Bank IDs excluded from data generation.  These entries carry
+# Transportation.cost anywhere in their template.  Transportation.cost
+# preferences are dropped in this pipeline because per-leg transport
+# cost is origin-dependent (see design note in build_query_db) and
+# quartile-ranking a mixed flight/ground pool doesn't give a
+# well-defined per-query semantics.  Aggregate transport feasibility is
+# still enforced via the TRANSPORT_BUDGET_CAP_FRAC gate on the picked
+# tour.
+EXCLUDED_BANK_IDS: set[tuple[str, int]] = {
+    ("AtomicPreference",                 23),
+    ("NumericPreference",                 8),
+    ("TemporalPreference.atmost_once",   15),
+    # CompensatoryPreference entries whose primary + margin are on a
+    # categorical multi-per-day axis (Restaurant.cuisine / Attraction.
+    # category).  Universal iteration over these attributes is too
+    # tight for realistic pools -- a plan needs every restaurant to
+    # be in {V1} OR {V2}, which the pool almost never supports for
+    # multi-restaurant days.  Numeric primary/margin (rating/cost),
+    # singleton axes (Accommodation, Transportation.mode), and any
+    # categorical SECONDARY are unaffected.
+    ("CompensatoryPreference",            4),   # cuisine ∈ {…} primary/margin
+    ("CompensatoryPreference",            6),   # category ∈ {…} primary/margin
+    ("CompensatoryPreference",            9),   # cuisine ∈ {…} primary/margin
+    ("CompensatoryPreference",           14),   # category ∈ {…} primary/margin
+}
+
+
 def flatten_bank(bank: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for p in PARADIGMS:
         if p == "TemporalPreference":
             for sub, lst in (bank.get(p) or {}).items():
+                key_p = f"TemporalPreference.{sub}"
                 for entry in lst:
+                    if (key_p, entry.get("id")) in EXCLUDED_BANK_IDS:
+                        continue
                     e = dict(entry)
                     e["_paradigm"] = p
                     e["_subtype"] = sub
                     out.append(e)
         else:
             for entry in bank.get(p, []) or []:
+                if (p, entry.get("id")) in EXCLUDED_BANK_IDS:
+                    continue
                 e = dict(entry)
                 e["_paradigm"] = p
                 e["_subtype"] = None
@@ -2617,16 +2758,10 @@ def predicate_feasible_alone(pred: dict[str, Any], qdb: dict[str, Any]) -> bool:
                 vs = val if isinstance(val, list) else [val]
                 return any(m not in vs for m in qdb["transport_modes"])
             return True
-        if attr == "cost":
-            stats = qdb["stats"].get(("Transportation", "cost"), {})
-            mn = stats.get(0.0); mx = stats.get(1.0)
-            if mn is None and mx is None:
-                return True
-            if op == "<=":
-                return mn is None or mn <= val
-            if op == ">=":
-                return mx is None or mx >= val
-            return True
+        # Transportation.cost branch dropped -- no bank entry carries
+        # Transportation.cost anymore (see EXCLUDED_BANK_IDS).  Aggregate
+        # transport-cost feasibility is enforced by the
+        # TRANSPORT_BUDGET_CAP_FRAC gate on the picked tour, not per-pred.
         if attr in ("arrival_time", "departure_time"):
             # Existence gate: at least one flight across the pinned tour's
             # seg-date legs must satisfy the time-category predicate. This
@@ -2834,15 +2969,46 @@ def is_single_feasible(entry: dict[str, Any], template: dict[str, Any],
 # Per-city pool floor: combined-filter feasibility (Strategy B)               #
 # --------------------------------------------------------------------------- #
 
+def _all_preds_for_city(buckets: dict[str, Any], entity: str,
+                        city: str) -> list[dict[str, Any]]:
+    """Concatenate the trip-wide ``all_by_entity`` predicates for
+    ``entity`` with any ``bound_city_all_by_entity[(entity, city)]``
+    preds -- e.g. Conditional Day.city predicates whose then_pref is
+    scope="all".  The returned list is what ``_items_pass_all`` should
+    receive as its ``preds`` argument at any per-city site."""
+    preds = list((buckets.get("all_by_entity") or {}).get(entity, []))
+    bound = (buckets.get("bound_city_all_by_entity") or {}).get((entity, city))
+    if bound:
+        preds.extend(bound)
+    return preds
+
+
 def _items_pass_all(items: list[dict[str, Any]], entity: str,
-                    preds: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Filter items by intersecting every predicate in preds."""
+                    preds: list[dict[str, Any]],
+                    or_groups: list[list[dict[str, Any]]] | None = None
+                    ) -> list[dict[str, Any]]:
+    """Filter items by intersecting every predicate in ``preds`` (AND
+    filter) and, if given, additionally requiring each ``or_groups``
+    group's disjunction to hold per-item.
+
+    ``or_groups`` carries same-entity Composite-OR children with
+    ``scope="all"``.  A Composite ``P1 OR P2`` at trip-wide ``[all]``
+    scope semantically requires every item to satisfy ``P1`` OR ``P2``.
+    Heterogeneous-entity OR predicates never enter this bucket -- their
+    disjunction spans different pools and is planner-side.
+    """
     out = items
     for p in preds:
         out = [it for it in out
                if predicate_holds(it, entity, p["attribute"], p["op"], p["value"])]
         if not out:
-            break
+            return out
+    for group in (or_groups or []):
+        out = [it for it in out
+               if any(predicate_holds(it, entity, p["attribute"], p["op"], p["value"])
+                      for p in group)]
+        if not out:
+            return out
     return out
 
 
@@ -2887,12 +3053,15 @@ def _walk_atomic_nodes(paradigm: str, template: dict[str, Any]
 
 def _is_flight_demanding_pred(p: dict[str, Any]) -> bool:
     """True if the predicate effectively requires flight transport.
-    Per the design directive: cost predicates on Transportation, and any
-    mode predicate that mandates Flight, require flight_only_feasible."""
+    Predicates on Transportation.departure_time / arrival_time, or any
+    Transportation.mode predicate that mandates Flight, require
+    flight_only_feasible.  Transportation.cost is intentionally NOT in
+    this list -- the whole Transportation.cost path is dropped in this
+    pipeline (see EXCLUDED_BANK_IDS)."""
     if p["entity"] != "Transportation":
         return False
     attr = p["attribute"]
-    if attr in ("cost", "departure_time", "arrival_time"):
+    if attr in ("departure_time", "arrival_time"):
         return True
     if attr == "mode":
         op = p["op"]; val = p["value"]
@@ -2989,6 +3158,19 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
     entity-pool preds.  Transportation preds are surfaced only via the
     flight-demanding flags."""
     all_by_entity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    # Per-item disjunction groups: Composite OR with scope="all" whose
+    # children share the same entity, AND Compensatory (primary, margin)
+    # with primary.scope="all" (below-margin items are unconditionally
+    # invalid).  Each list entry is one OR-group's child pred list; the
+    # solution / feasibility pool must keep only items satisfying at
+    # least one child of each group.  Heterogeneous (cross-entity) OR
+    # predicates do NOT populate this bucket.
+    all_by_entity_or_groups: dict[str, list[list[dict[str, Any]]]] = defaultdict(list)
+    # Bound-city per-item filters: Conditional (Day.city == X → then_pref)
+    # with then_pref.scope="all".  Only city X's pool is restricted -- the
+    # semantic is "every accom in city X satisfies then_pref"; other
+    # cities are unrestricted.
+    bound_city_all_by_entity: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     floor_checks: list[tuple[dict[str, Any], str | None, str | None]] = []
     flight_demanding_all = False
     flight_demanding_any = False
@@ -3039,7 +3221,26 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
 
         elif paradigm == "CompositePreference":
             comp_op = template.get("op", "AND")
-            for c in template.get("children", []) or []:
+            children = template.get("children", []) or []
+            # For an OR composite at [all]-scope on children of a single
+            # entity, gather them into a per-item OR-group so the emitter
+            # can require each item to satisfy at least one child.
+            # Heterogeneous (mixed-entity) OR-[all] children remain as
+            # floor_checks -- their disjunction spans different pools.
+            or_all_children: list[dict[str, Any]] = []
+            if comp_op == "OR":
+                for c in children:
+                    p = _make_pred(c, "child")
+                    if p is None or p["entity"] in ("Day", "Transportation"):
+                        continue
+                    if p["scope"] == "all":
+                        or_all_children.append(p)
+                same_entity = (len(or_all_children) >= 2
+                               and len({p["entity"] for p in or_all_children}) == 1)
+                if same_entity:
+                    all_by_entity_or_groups[or_all_children[0]["entity"]].append(
+                        or_all_children)
+            for c in children:
                 p = _make_pred(c, "child")
                 if p is None:
                     continue
@@ -3049,6 +3250,10 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
                 if comp_op != "OR" and p["scope"] == "all":
                     add_all_filter(p)
                 else:
+                    # OR children are still floor-checked (per-city
+                    # existence of at least one satisfier per child) so
+                    # feasibility remains provable even if the per-item
+                    # OR-group filter shrinks the pool.
                     add_check(p, paradigm)
 
         elif paradigm == "NumericPreference":
@@ -3070,6 +3275,15 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
                 flag_flight(p_then)
                 if isinstance(city, str):
                     add_check(p_then, paradigm, bound_city=city)
+                    # Per-item filter for the bound city's pool: since the
+                    # condition Day.city == <city> is universally true FOR
+                    # that city and then_pref.scope="all" makes it apply to
+                    # every accom/rest/attraction in that city, filter the
+                    # bound city's pool.  Below-then_pref items in <city>
+                    # can never appear in a valid plan.
+                    if (p_then and p_then.get("scope") == "all"
+                            and p_then["entity"] not in ("Day", "Transportation")):
+                        bound_city_all_by_entity[(p_then["entity"], city)].append(p_then)
                 else:
                     add_check(p_then, paradigm)
                 # condition is Day.city; no entity-pool floor check.
@@ -3098,17 +3312,33 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
                     add_check(p, paradigm)
 
         elif paradigm == "CompensatoryPreference":
-            for k, role in (("primary_ap", "primary"),
-                            ("margin_ap", "margin"),
-                            ("secondary_ap", "secondary")):
-                n = template.get(k)
-                p = _make_pred(n, role)
+            primary_p = _make_pred(template.get("primary_ap"),   "primary")
+            margin_p  = _make_pred(template.get("margin_ap"),    "margin")
+            secondary_p = _make_pred(template.get("secondary_ap"), "secondary")
+            for p in (primary_p, margin_p, secondary_p):
                 if p is None:
                     continue
                 flag_flight(p)
-                # All three slots are existential trade-offs; none is a
-                # hard trip-wide [all] filter even if marked scope=all.
+                # All three slots are existential trade-offs; none is
+                # itself a hard trip-wide [all] filter even if marked
+                # scope="all".  Floor-check them existentially so the
+                # planner still has options; the per-item OR-group filter
+                # below carves out the acceptable primary/margin band.
                 add_check(p, paradigm)
+            # Per-item filter: when primary.scope="all", every item must
+            # land at or above the margin threshold (items below margin
+            # can never appear in a valid plan -- secondary compensation
+            # kicks in only within [margin, primary], not below).  Encode
+            # this as a two-child OR group [primary, margin] so the
+            # existing OR-group machinery in _items_pass_all handles it.
+            # Only meaningful when primary and margin share the same
+            # entity (they always do in the current bank, but check).
+            if (primary_p and margin_p
+                    and primary_p.get("scope") == "all"
+                    and primary_p["entity"] == margin_p["entity"]
+                    and primary_p["entity"] not in ("Day", "Transportation")):
+                all_by_entity_or_groups[primary_p["entity"]].append(
+                    [primary_p, margin_p])
 
         elif paradigm == "TemporalPreference":
             op = template.get("op")
@@ -3207,24 +3437,37 @@ def _collect_record_preds(specs: list[tuple[str, dict[str, Any]]]
                     add_check(ip, paradigm)
 
     return {
-        "all_by_entity":         dict(all_by_entity),
-        "floor_checks":          floor_checks,
-        "flight_demanding_all":  flight_demanding_all,
-        "flight_demanding_any":  flight_demanding_any,
-        "time_window_checks":    time_window_checks,
+        "all_by_entity":               dict(all_by_entity),
+        "all_by_entity_or_groups":     dict(all_by_entity_or_groups),
+        "bound_city_all_by_entity":    dict(bound_city_all_by_entity),
+        "floor_checks":                floor_checks,
+        "flight_demanding_all":        flight_demanding_all,
+        "flight_demanding_any":        flight_demanding_any,
+        "time_window_checks":          time_window_checks,
     }
 
 
 def _floor_for(pred: dict[str, Any], paradigm: str | None = None) -> int:
-    """Per-city floor for a single predicate.  [all]-scope uses the entity-
-    specific PER_CITY_ALL_FLOOR; [any]-scope uses PER_CITY_ANY_FLOOR, or
-    the entity-specific Compensatory floor for Compensatory sub-preds
-    (per-day scaling for Restaurant/Attraction; still 1 for Accommodation
-    since a stay is booked once per city, not once per day)."""
+    """Per-city floor for a single predicate.
+
+    * [all]-scope predicates                -> PER_CITY_ALL_FLOOR (per entity)
+    * [any]-scope Compensatory sub-preds    -> PER_CITY_ALL_FLOOR_COMPENSATORY
+      (currently equal to PER_CITY_ANY_FLOOR_COMPENSATORY; both keep the
+      pool deep enough to feed the primary/margin universal iteration.
+      The role distinction (primary/margin = universal, secondary =
+      same-day existential) is a SEMANTIC one carried in the NL
+      verbalization and evaluator, not in the pool-count floor.)
+    * everything else                       -> PER_CITY_ANY_FLOOR (=1)
+    Singleton entities (Accommodation: 1 stay per city; Transportation
+    aggregated as one leg-mode) stay at 1 across every floor."""
     if pred["scope"] == "all":
         return PER_CITY_ALL_FLOOR.get(pred["entity"], PER_CITY_ANY_FLOOR)
     if paradigm == "CompensatoryPreference":
-        return PER_CITY_ANY_FLOOR_COMPENSATORY.get(pred["entity"], PER_CITY_ANY_FLOOR)
+        role = pred.get("role", "")
+        table = (PER_CITY_ALL_FLOOR_COMPENSATORY
+                 if role in ("primary", "margin")
+                 else PER_CITY_ANY_FLOOR_COMPENSATORY)
+        return table.get(pred["entity"], PER_CITY_ANY_FLOOR)
     return PER_CITY_ANY_FLOOR
 
 
@@ -3282,12 +3525,19 @@ def combined_pool_ok(specs: list[tuple[str, dict[str, Any]]],
     for c in candidate:
         checks: dict[str, dict[str, Any]] = {}
         # Step 1
-        for entity, preds in buckets["all_by_entity"].items():
+        or_groups_by_ent = buckets.get("all_by_entity_or_groups") or {}
+        bound_cae       = buckets.get("bound_city_all_by_entity") or {}
+        entities_for_step1 = (set(buckets["all_by_entity"].keys())
+                              | set(or_groups_by_ent.keys())
+                              | {e for (e, cc) in bound_cae.keys() if cc == c})
+        for entity in entities_for_step1:
+            preds = _all_preds_for_city(buckets, entity, c)
             floor = PER_CITY_ALL_FLOOR.get(entity)
             if floor is None:
                 continue
             items = _items_pass_all(
-                pool_by_city.get(entity, {}).get(c, []), entity, preds)
+                pool_by_city.get(entity, {}).get(c, []), entity, preds,
+                or_groups=or_groups_by_ent.get(entity))
             aff = _affordable_subset(items, entity, "all", None, qdb)
             checks[f"step1_all[{entity}]"] = {
                 "affordable_count": len(aff), "floor": floor,
@@ -3301,7 +3551,7 @@ def combined_pool_ok(specs: list[tuple[str, dict[str, Any]]],
                 continue
             if bound_city is not None and bound_city != c:
                 continue
-            all_preds = buckets["all_by_entity"].get(entity, [])
+            all_preds = _all_preds_for_city(buckets, entity, c)
             floor = _floor_for(pred, paradigm_tag)
             scope = pred.get("scope", "any")
             # Same-entity scope filters (from ScopedPreference, e.g.
@@ -3310,7 +3560,8 @@ def combined_pool_ok(specs: list[tuple[str, dict[str, Any]]],
             inner_filters = pred.get("inner_filters") or []
             combined = all_preds + list(inner_filters) + [pred]
             items = _items_pass_all(
-                pool_by_city.get(entity, {}).get(c, []), entity, combined)
+                pool_by_city.get(entity, {}).get(c, []), entity, combined,
+                or_groups=or_groups_by_ent.get(entity))
             aff = _affordable_subset(items, entity, scope, paradigm_tag, qdb)
             label = f"step2[{paradigm_tag}:{entity}.{pred.get('attribute')}:{scope}:idx{i}]"
             checks[label] = {
@@ -3341,10 +3592,15 @@ def combined_pool_ok(specs: list[tuple[str, dict[str, Any]]],
         if floor is None:
             continue
         label = f"step2_or[CompositePreference#{pi}:{ent}:{or_scope}]"
+        # Apply OR-groups OTHER than the current one to the baseline;
+        # the current group's disjunction is the union check itself.
+        other_or_groups = [g for j, g in enumerate(or_groups_by_ent.get(ent, []))
+                           if g is not kids]
         for c in candidate:
             pool = pool_by_city.get(ent, {}).get(c, [])
             baseline = _items_pass_all(pool, ent,
-                                       buckets["all_by_entity"].get(ent, []))
+                                       _all_preds_for_city(buckets, ent, c),
+                                       or_groups=other_or_groups)
             seen: set[int] = set()
             union_items: list[dict[str, Any]] = []
             for kid in kids:
@@ -4162,8 +4418,20 @@ def _adjust_categorical_pred(rigid_list: list[dict[str, Any]],
         # ---- Synergistic in vs in: overlap allowed; ensure non-empty
         # intersection when rigid=[all] AND adj=[any]. ----
         elif op_rigid == "in" and op_adj == "in":
-            if rp.get("scope") == "all" and ap.get("scope") == "any":
-                if not (s_adj & s_rigid):
+            if rp.get("scope") == "all":
+                # Rigid is UNIVERSAL: the pool is restricted to items with
+                # attribute value in s_rigid.  Any value in s_adj outside
+                # s_rigid is DANGLING -- no plan can realise it -- and its
+                # presence in a rendered NL query reads as contradictory
+                # ("attractions in {Museums, W&A Parks}" while the whole
+                # trip is filtered to "not W&A Parks").
+                # Trim s_adj to (s_adj ∩ s_rigid) whether or not the
+                # intersection is currently empty; when empty, fall back
+                # to sampling replacements from within s_rigid.
+                intersection = s_adj & s_rigid
+                if intersection:
+                    s_adj = intersection
+                else:
                     replacement = _sample_intersection(entity, attribute, s_rigid,
                                                        max(1, len(s_adj)), qdb, rng)
                     if not replacement:
@@ -4459,16 +4727,24 @@ def build_feasibility_metadata(
     buckets = _collect_record_preds(specs)
 
     # ---- Per-candidate-city pass/fail per floor check ----
+    or_groups_by_ent_meta = buckets.get("all_by_entity_or_groups") or {}
+    bound_cae_meta        = buckets.get("bound_city_all_by_entity") or {}
     per_city_breakdown: dict[str, dict[str, Any]] = {}
     for c in candidate:
         checks: dict[str, Any] = {}
-        # Step 1: per-entity joint [all] filter
-        for entity, preds in buckets["all_by_entity"].items():
+        # Step 1: per-entity joint [all] filter (AND + per-item OR-groups
+        # + bound-city per-item preds for this city)
+        entities_step1 = (set(buckets["all_by_entity"].keys())
+                          | set(or_groups_by_ent_meta.keys())
+                          | {e for (e, cc) in bound_cae_meta.keys() if cc == c})
+        for entity in entities_step1:
+            preds = _all_preds_for_city(buckets, entity, c)
             floor = PER_CITY_ALL_FLOOR.get(entity)
             if floor is None:
                 continue
             items = _items_pass_all(pool_by_city.get(entity, {}).get(c, []),
-                                    entity, preds)
+                                    entity, preds,
+                                    or_groups=or_groups_by_ent_meta.get(entity))
             aff = _affordable_subset(items, entity, "all", None, qdb_emit)
             checks[f"step1_all[{entity}]"] = {
                 "raw_count": len(items),
@@ -4486,13 +4762,14 @@ def build_feasibility_metadata(
                 continue
             if bound_city is not None and bound_city != c:
                 continue  # bound check applies only to its specific city
-            all_preds = buckets["all_by_entity"].get(entity, [])
+            all_preds = _all_preds_for_city(buckets, entity, c)
             floor = _floor_for(pred, paradigm_tag)
             scope = pred.get("scope", "any")
             inner_filters = pred.get("inner_filters") or []
             combined = all_preds + list(inner_filters) + [pred]
             items = _items_pass_all(pool_by_city.get(entity, {}).get(c, []),
-                                    entity, combined)
+                                    entity, combined,
+                                    or_groups=or_groups_by_ent_meta.get(entity))
             aff = _affordable_subset(items, entity, scope, paradigm_tag, qdb_emit)
             label = f"step2[{paradigm_tag}:{entity}.{pred.get('attribute')}:{scope}:idx{i}]"
             checks[label] = {
@@ -4545,11 +4822,20 @@ def build_feasibility_metadata(
                  else PER_CITY_ANY_FLOOR)
         if floor is None:
             continue
+        # If we have per-item OR groups (only for same-entity all-scope
+        # composites), apply the OTHER groups to the baseline; the current
+        # composite's disjunction IS the union check itself.
+        or_groups_here = or_groups_by_ent_meta.get(ent, [])
+        # match by content since bucket group is a list built from _make_pred
+        current_attrs = {k.get("attribute") for k in kids}
+        other_or_groups = [g for g in or_groups_here
+                           if {p["attribute"] for p in g} != current_attrs]
         label = f"step2_or[CompositePreference#{pi}:{ent}:{or_scope}]"
         for c in candidate:
             pool = pool_by_city.get(ent, {}).get(c, [])
             baseline = _items_pass_all(
-                pool, ent, buckets["all_by_entity"].get(ent, []))
+                pool, ent, _all_preds_for_city(buckets, ent, c),
+                or_groups=other_or_groups)
             seen: set[int] = set()
             union_items: list[dict[str, Any]] = []
             for kid in kids:
@@ -4657,7 +4943,7 @@ def build_feasibility_metadata(
         fto   = ([r for r in flight_records.get((c, org), []) if r.get("date") == seg_end]
                  if seg_end else [])
         constraint_pools[c] = {
-            "accommodation": accom,
+            "accommodation": _restore_unit_price_for_emit(accom),
             "restaurant":    rest,
             "attraction":    attr,
             "flights_from_origin": flight_block(ffo),
@@ -4743,7 +5029,11 @@ def build_feasibility_metadata(
     solution_pool_shortfalls: list[dict[str, Any]] = []
     specs = [(p["paradigm"], p["template"])
              for p in (preferences or [])]
-    buckets = _collect_record_preds(specs) if specs else {"all_by_entity": {}, "floor_checks": []}
+    buckets = _collect_record_preds(specs) if specs else {
+        "all_by_entity": {}, "all_by_entity_or_groups": {},
+        "bound_city_all_by_entity": {}, "floor_checks": []}
+    or_groups_by_ent_emit = buckets.get("all_by_entity_or_groups") or {}
+    bound_cae_emit         = buckets.get("bound_city_all_by_entity") or {}
     entity_key_map = (("accommodation", "Accommodation"),
                       ("restaurant",    "Restaurant"),
                       ("attraction",    "Attraction"))
@@ -4751,18 +5041,23 @@ def build_feasibility_metadata(
         entity_pools: dict[str, list] = {}
         for ek, entity in entity_key_map:
             base = pool_by_city.get(entity, {}).get(city, [])
-            # Only `all_by_entity` predicates are trip-wide UNCONDITIONAL
-            # [all]-filters (per _collect_record_preds's contract). Sub-
-            # preds nested under Scoped / Conditional / Temporal /
-            # Compensatory / Lex-secondary appear in `floor_checks` and
-            # apply only within their scope -- they must NOT be treated
-            # as pool-wide filters here.
-            preds_all = list(buckets["all_by_entity"].get(entity, []))
-            if preds_all:
-                # This entity is constrained by at least one preference:
-                # apply the [all]-scope filter AND the affordability
-                # envelope (mirrors combined_pool_ok / try_resolve).
-                items = _items_pass_all(base, entity, preds_all)
+            # Three per-item filters may apply:
+            #   (a) all_by_entity      -- AND of trip-wide [all] predicates
+            #       (Atomic-main / AND-Composite children / Lex-primary).
+            #   (b) all_by_entity_or_groups -- for each same-entity Composite
+            #       OR with [all]-scope children, require the disjunction to
+            #       hold per-item.  Also carries Compensatory (primary,
+            #       margin) OR-groups: below-margin items are unpickable.
+            #   (c) bound_city_all_by_entity -- Conditional Day.city == <c>
+            #       -> then_pref[all] applies universally in city <c>'s pool.
+            # Sub-preds nested under Scoped / Temporal / other Conditionals /
+            # Lex-secondary remain in `floor_checks` -- their [all] semantics
+            # is scope-conditioned and stays planner-side.
+            preds_all = _all_preds_for_city(buckets, entity, city)
+            or_groups = or_groups_by_ent_emit.get(entity)
+            if preds_all or or_groups:
+                items = _items_pass_all(base, entity, preds_all,
+                                        or_groups=or_groups)
                 aff = _affordable_subset(items, entity, "all", None, qdb_emit)
             else:
                 # No preference touches this entity -> keep the
@@ -4770,7 +5065,11 @@ def build_feasibility_metadata(
                 # not affordability-trim entities the prefs don't
                 # constrain, so neither do we here).
                 aff = base
-            entity_pools[ek] = aff
+            # Strip _unit_price shadow (added at qdb-build time for
+            # per-person affordability comparison) so the emitted
+            # solution_information carries the CSV-native unit price.
+            entity_pools[ek] = (_restore_unit_price_for_emit(aff)
+                                if entity == "Accommodation" else aff)
             floor = PER_CITY_ALL_FLOOR.get(entity, 0)
             if len(aff) < floor:
                 solution_pool_shortfalls.append({
@@ -4870,6 +5169,7 @@ def build_feasibility_metadata(
             "Attraction_all":      PER_CITY_ALL_FLOOR["Attraction"],
             "Transportation_all":  PER_CITY_ALL_FLOOR["Transportation"],
             "any_default":         PER_CITY_ANY_FLOOR,
+            "all_compensatory":    PER_CITY_ALL_FLOOR_COMPENSATORY,
             "any_compensatory":    PER_CITY_ANY_FLOOR_COMPENSATORY,
         },
         "visit_n": visit_n,
@@ -5294,9 +5594,23 @@ class Tracker:
             self.pair_sub_counts[(level, sub)] += 1
 
     def absorb_record(self, record: dict[str, Any]) -> None:
-        """Update counters from an already-augmented record (used during
-        targeted-regeneration so the sampler stays balanced relative to
-        whatever wasn't regenerated)."""
+        """Update EVERY tracker counter from an already-augmented record.
+        Called during targeted --regen for each pass-through record so
+        the sampler's balancing decisions on the re-augmented queries
+        stay consistent with the wider dataset.
+
+        Covers:
+          paradigm_counts, temporal_sub_counts, complex_counts,
+          pair_counts, pair_sub_counts             (via record_single /
+                                                    record_pair)
+          bank_id_counts                           (per preference)
+          pair_type_counts, pair_sub_type_counts   (complex side of pair)
+
+        The complex side of a pair is prefs[1] (record_pair semantics:
+        `complex_counts[(level, second_paradigm)] += 1`), so
+        pair_type / pair_sub_type counters are keyed on prefs[1]'s
+        (paradigm, sub_key, bank_id).
+        """
         level = record.get("level", "?")
         prefs = record.get("preferences") or []
         if not prefs:
@@ -5306,10 +5620,32 @@ class Tracker:
         if pairing == "single":
             p = prefs[0]
             self.record_single(level, p["paradigm"], p.get("subtype"))
+            # Bank-id counter (mirrors record_bank_pick's book-keeping).
+            bid = p.get("bank_id")
+            if bid is not None:
+                self.bank_id_counts[(level, p["paradigm"],
+                                     p.get("subtype"), bid)] += 1
         elif len(prefs) >= 2:
             p1, p2 = prefs[0], prefs[1]
             self.record_pair(level, p1["paradigm"], p2["paradigm"],
                              p2.get("subtype"), pairing, sub)
+            for p in (p1, p2):
+                bid = p.get("bank_id")
+                if bid is not None:
+                    self.bank_id_counts[(level, p["paradigm"],
+                                         p.get("subtype"), bid)] += 1
+            # Per-(complex-bank) pair-type / overlap-subtype counters.
+            # Mirror record_pair_bank_context: keyed on prefs[1]
+            # (paradigm, sub_key, bank_id).
+            cx_bank_id = p2.get("bank_id")
+            if cx_bank_id is not None:
+                self.pair_type_counts[(level, p2["paradigm"],
+                                       p2.get("subtype"), cx_bank_id,
+                                       pairing)] += 1
+                if sub is not None:
+                    self.pair_sub_type_counts[(level, p2["paradigm"],
+                                               p2.get("subtype"),
+                                               cx_bank_id, sub)] += 1
 
 
 def _template_uses_unavailable_entity(entry: dict[str, Any],
@@ -5448,36 +5784,44 @@ def _try_pair_pc_anchor(level: str, pc: dict[str, Any], tc: dict[str, Any],
         if res_a is None:
             continue
         ta, mult_a = res_a
+        # DEEP-COPY tc for this anchor attempt.  _pair_adjust mutates
+        # its 2nd-position template in place, and a REJECTED mutation
+        # from a prior anchor attempt would otherwise leak into
+        # subsequent attempts (including non-overlapping ones that
+        # don't re-check intra_pref_invariants_ok) -- surfacing e.g.
+        # Comp primary_val == margin_val in the emit even though the
+        # guard rejected it upstream.
+        tc_local = deepcopy(tc)
         if is_overlap:
             # Anchor (Atomic/Composite) side stays as t1 for
             # _pair_adjust regardless of search-order shift.
             if not _pair_adjust(ta, pa["_paradigm"],
-                                tc, pc["_paradigm"], qdb, rng):
+                                tc_local, pc["_paradigm"], qdb, rng):
                 continue
             if not intra_pref_invariants_ok(pa["_paradigm"], ta):
                 continue
-            if not intra_pref_invariants_ok(pc["_paradigm"], tc):
+            if not intra_pref_invariants_ok(pc["_paradigm"], tc_local):
                 continue
             if not pair_genuinely_active(
-                    ta, pa["_paradigm"], tc, pc["_paradigm"], qdb):
+                    ta, pa["_paradigm"], tc_local, pc["_paradigm"], qdb):
                 continue
             if not is_single_feasible(pa, ta, qdb) \
-                    or not is_single_feasible(pc, tc, qdb):
+                    or not is_single_feasible(pc, tc_local, qdb):
                 continue
             if not secondary_budget_feasible(pa, ta, qdb) \
-                    or not secondary_budget_feasible(pc, tc, qdb):
+                    or not secondary_budget_feasible(pc, tc_local, qdb):
                 continue
         if not pair_joint_feasible(
-                ta, pa["_paradigm"], tc, pc["_paradigm"], qdb):
+                ta, pa["_paradigm"], tc_local, pc["_paradigm"], qdb):
             continue
         ok_pair, mult_pair, _ = combined_pool_ok_with_budget_adjust(
-            [(pa["_paradigm"], ta), (pc["_paradigm"], tc)], qdb)
+            [(pa["_paradigm"], ta), (pc["_paradigm"], tc_local)], qdb)
         if not ok_pair:
             continue
         applied_mult = max(mult_c, mult_a, mult_pair)
         if pairing == "overlapping":
             cls = classify_overlap(
-                ta, pa["_paradigm"], tc, pc["_paradigm"])
+                ta, pa["_paradigm"], tc_local, pc["_paradigm"])
             if sub is not None and cls != sub:
                 continue
             actual_sub = cls
@@ -5498,7 +5842,7 @@ def _try_pair_pc_anchor(level: str, pc: dict[str, Any], tc: dict[str, Any],
         return {
             "preferences": [
                 make_resolved_record(pa, ta),
-                make_resolved_record(pc, tc),
+                make_resolved_record(pc, tc_local),
             ],
             "preference_traces": [trace(pa), trace(pc)],
             "pairing_type":      pairing,
@@ -5670,14 +6014,15 @@ def _parse_regen_spec(spec: str | None) -> dict[int, tuple[str | None, str | Non
 
 def main() -> None:
     project = Path(__file__).resolve().parent
+    parent  = project.parent
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bank", type=Path,
                     default=project / "preference_bank.json")
     ap.add_argument("--queries", type=Path,
-                    default=project / "travelplanner-test.jsonl")
+                    default=parent / "travelplanner-test.jsonl")
     ap.add_argument("--db", type=Path,
-                    default=project / "database")
+                    default=parent / "database")
     ap.add_argument("--out", type=Path,
                     default=project / "prefertripplan.jsonl")
     ap.add_argument("--seed", type=int, default=20260601)
@@ -5767,6 +6112,70 @@ def main() -> None:
                 out_rec["pairing_subtype"] = None
                 out_rec["budget_original"] = query["budget"]
                 out_rec["budget_multiplier"] = 1.0
+                # Even when no preferences can be resolved (destination cities
+                # absent from attractions.csv etc.), we still emit a MINIMAL
+                # feasibility_metadata block so downstream consumers -- the
+                # persona/query renderer, the HF export, planner harnesses --
+                # get the same reference_information contract for every
+                # record. The tour is a fallback: first visit_n cities from
+                # the scope. raw_mode=True dumps the full source items;
+                # planners enforce local_constraint themselves.
+                scope_cities   = qdb.get("scope_cities") or []
+                visit_n_local  = max(query.get("visiting_city_number", 1), 1)
+                fallback_tour  = list(scope_cities[:visit_n_local])
+                if fallback_tour:
+                    seg_start, seg_mid, seg_end = segmentation_leg_dates(query)
+                    raw_bc = qdb.get("raw_pool_by_city") or {}
+                    filt_bc = qdb.get("pool_by_city") or {}
+                    # Reference pool: raw source rows, no filter -- planner
+                    # under test enforces local_constraint itself.
+                    ref_pool_source = {
+                        city: {
+                            "accommodation": (raw_bc.get("Accommodation") or {}).get(city, []),
+                            "restaurant":    (raw_bc.get("Restaurant")    or {}).get(city, []),
+                            "attraction":    (raw_bc.get("Attraction")    or {}).get(city, []),
+                        } for city in fallback_tour
+                    }
+                    # Solution pool: hard-constraint-filtered rows. With no
+                    # preferences resolved, the [all]-scope pref filter is
+                    # a no-op, so the constraint-filtered pool passes
+                    # through unchanged.
+                    sol_pool_source = {
+                        city: {
+                            "accommodation": _restore_unit_price_for_emit(
+                                (filt_bc.get("Accommodation") or {}).get(city, [])),
+                            "restaurant":    (filt_bc.get("Restaurant")    or {}).get(city, []),
+                            "attraction":    (filt_bc.get("Attraction")    or {}).get(city, []),
+                        } for city in fallback_tour
+                    }
+                    modes_allowed_q = transportation_modes_allowed(query)
+                    reference_information = _build_reference_information(
+                        org=query["org"], selected_tour=fallback_tour,
+                        seg_start=seg_start, seg_mid=list(seg_mid) if seg_mid else [],
+                        seg_end=seg_end,
+                        pool_source=ref_pool_source,
+                        flight_records=flight_records,
+                        distance=distance,
+                        modes_allowed=modes_allowed_q,
+                        raw_mode=True,
+                    )
+                    solution_information = _build_reference_information(
+                        org=query["org"], selected_tour=fallback_tour,
+                        seg_start=seg_start, seg_mid=list(seg_mid) if seg_mid else [],
+                        seg_end=seg_end,
+                        pool_source=sol_pool_source,
+                        flight_records=flight_records,
+                        distance=distance,
+                        modes_allowed=modes_allowed_q,
+                        raw_mode=False,   # respect local_constraint modes
+                    )
+                    out_rec["feasibility_metadata"] = {
+                        "selected_tour":         fallback_tour,
+                        "modes_allowed":         sorted(modes_allowed_q),
+                        "reference_information": reference_information,
+                        "solution_information":  solution_information,
+                        "passthrough":           True,   # marker: no preferences resolved
+                    }
             else:
                 n_with_prefs += 1
                 if regen_spec and qid in regen_spec:

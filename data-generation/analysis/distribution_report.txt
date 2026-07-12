@@ -1,0 +1,240 @@
+PreferTripPlan (data-generation) — Distributional Report
+============================================================
+
+Records analyzed          : 1000
+Records with preferences  : 983
+Records without prefs     : 17  (pass-through)
+
+[1] Records per difficulty level
+  level     count       %
+  ------  -------  ------
+  easy        348   34.8%
+  medium      333   33.3%
+  hard        319   31.9%
+  Pass-through records by level:
+    easy   3
+    medium 11
+    hard   3
+
+[2] Preference-paradigm distribution
+  Top-level paradigm (overall):
+  paradigm                   count       %
+  -----------------------  -------  ------
+  AtomicPreference             365   22.5%
+  CompositePreference          359   22.1%
+  NumericPreference            149    9.2%
+  ConditionalPreference        149    9.2%
+  LexicographicPreference      150    9.3%
+  CompensatoryPreference       150    9.3%
+  TemporalPreference           149    9.2%
+  ScopedPreference             150    9.3%
+  Top-level paradigm by level:
+  paradigm                    easy   medium     hard    total
+  -----------------------  -------  -------  -------  -------
+  AtomicPreference              43      322        0      365
+  CompositePreference           43        0      316      359
+  NumericPreference             43       54       52      149
+  ConditionalPreference         43       53       53      149
+  LexicographicPreference       44       53       53      150
+  CompensatoryPreference        43       54       53      150
+  TemporalPreference            43       54       52      149
+  ScopedPreference              43       54       53      150
+  Temporal subtype (op) distribution:
+  op                 count       %
+  ---------------  -------  ------
+  always                17   11.4%
+  sometime              16   10.7%
+  within                16   10.7%
+  atmost_once           18   12.1%
+  sometime_before       17   11.4%
+  sometime_after        16   10.7%
+  always_within         18   12.1%
+  hold_during           16   10.7%
+  hold_after            15   10.1%
+  Temporal subtype by level:
+  op                  easy   medium     hard    total
+  ---------------  -------  -------  -------  -------
+  always                 5        6        6       17
+  sometime               5        6        5       16
+  within                 4        6        6       16
+  atmost_once            5        7        6       18
+  sometime_before        5        6        6       17
+  sometime_after         5        5        6       16
+  always_within          5        7        6       18
+  hold_during            5        6        5       16
+  hold_after             4        5        6       15
+
+[3] Preferences per record
+  n_prefs    count       %
+  -------  -------  ------
+  0             17    1.7%
+  1            345   34.5%
+  2            638   63.8%
+
+[4] Bank-id usage per paradigm
+  (Temporal ids are op-scoped in the bank — reported per op.)
+
+  ─ AtomicPreference  (distinct ids used: 24;  total draws: 365)
+  bank_id    count       %
+  -------  -------  ------
+  8             17    4.7%
+  9             17    4.7%
+  11            16    4.4%
+  16            16    4.4%
+  17            16    4.4%
+  20            16    4.4%
+  24            16    4.4%
+  6             16    4.4%
+  1             15    4.1%
+  10            15    4.1%
+  12            15    4.1%
+  14            15    4.1%
+  15            15    4.1%
+  2             15    4.1%
+  21            15    4.1%
+  22            15    4.1%
+  25            15    4.1%
+  3             15    4.1%
+  7             15    4.1%
+  13            14    3.8%
+  18            14    3.8%
+  19            14    3.8%
+  4             14    3.8%
+  5             14    3.8%
+  ─ CompositePreference  (distinct ids used: 14;  total draws: 359)
+    2:33, 3:36, 4:7, 5:36, 6:2, 7:17, 8:37, 9:4, 10:14, 11:15, 12:36, 13:36, 14:49, 15:37
+  ─ NumericPreference  (distinct ids used: 10;  total draws: 149)
+    1:14, 2:14, 3:15, 4:14, 5:16, 6:16, 7:14, 9:17, 10:14, 11:15
+  ─ ConditionalPreference  (distinct ids used: 10;  total draws: 149)
+    1:15, 2:16, 3:19, 4:16, 5:16, 6:15, 7:11, 8:18, 9:14, 10:9
+  ─ LexicographicPreference  (distinct ids used: 12;  total draws: 150)
+    2:14, 3:13, 5:14, 6:13, 7:13, 8:13, 9:13, 10:13, 11:5, 12:14, 13:11, 14:14
+  ─ CompensatoryPreference  (distinct ids used: 9;  total draws: 150)
+    1:17, 2:9, 3:19, 5:29, 7:18, 10:14, 11:17, 12:14, 13:13
+  ─ ScopedPreference  (distinct ids used: 26;  total draws: 150)
+  bank_id    count       %
+  -------  -------  ------
+  10             9    6.0%
+  22             9    6.0%
+  26             9    6.0%
+  6              9    6.0%
+  16             8    5.3%
+  20             8    5.3%
+  21             8    5.3%
+  29             8    5.3%
+  4              8    5.3%
+  5              8    5.3%
+  8              8    5.3%
+  1              7    4.7%
+  2              7    4.7%
+  9              7    4.7%
+  13             6    4.0%
+  15             5    3.3%
+  27             5    3.3%
+  17             4    2.7%
+  28             4    2.7%
+  3              3    2.0%
+  11             2    1.3%
+  12             2    1.3%
+  19             2    1.3%
+  24             2    1.3%
+  18             1    0.7%
+  23             1    0.7%
+  ─ TemporalPreference.always  (distinct ids used: 6;  total draws: 17)
+    1:3, 2:2, 3:3, 4:2, 5:3, 6:4
+  ─ TemporalPreference.always_within  (distinct ids used: 8;  total draws: 18)
+    1:1, 2:1, 7:1, 8:2, 9:1, 11:10, 12:1, 13:1
+  ─ TemporalPreference.atmost_once  (distinct ids used: 9;  total draws: 18)
+    1:1, 4:1, 5:1, 6:2, 7:2, 8:1, 9:6, 12:2, 13:2
+  ─ TemporalPreference.hold_after  (distinct ids used: 6;  total draws: 15)
+    1:1, 4:2, 6:5, 7:1, 8:5, 9:1
+  ─ TemporalPreference.hold_during  (distinct ids used: 6;  total draws: 16)
+    1:1, 3:2, 5:3, 6:5, 7:4, 8:1
+  ─ TemporalPreference.sometime  (distinct ids used: 9;  total draws: 16)
+    1:1, 2:2, 5:1, 6:2, 8:2, 9:2, 10:3, 11:1, 12:2
+  ─ TemporalPreference.sometime_after  (distinct ids used: 6;  total draws: 16)
+    2:3, 3:2, 6:4, 7:2, 8:1, 9:4
+  ─ TemporalPreference.sometime_before  (distinct ids used: 6;  total draws: 17)
+    1:2, 2:2, 3:1, 4:4, 7:4, 8:4
+  ─ TemporalPreference.within  (distinct ids used: 10;  total draws: 16)
+    1:3, 2:2, 3:1, 5:1, 6:2, 8:1, 9:1, 10:2, 11:1, 14:2
+
+[5] Pairing type + subtype
+  pairing_type    count       %
+  ------------  -------  ------
+  single            345   34.5%
+  independent       424   42.4%
+  overlapping       214   21.4%
+  pass_through       17    1.7%
+  Pairing type by level:
+  pairing          easy   medium     hard    total
+  ------------  -------  -------  -------  -------
+  single            345        0        0      345
+  independent         0      215      209      424
+  overlapping         0      107      107      214
+  pass_through        3       11        3       17
+  Pairing subtype (overlapping only):
+  subtype          count       %
+  -------------  -------  ------
+  competing           54   25.2%
+  non_competing      160   74.8%
+  Pairing subtype by level:
+  subtype         medium     hard    total
+  -------------  -------  -------  -------
+  competing           27       27       54
+  non_competing       80       80      160
+
+[6] Profile drift mode (aligned / omission / inversion)
+  drift_mode    count       %
+  ----------  -------  ------
+  aligned         300   30.0%
+  omission        351   35.1%
+  inversion       349   34.9%
+  By level:
+  drift_mode     easy   medium     hard    total
+  ----------  -------  -------  -------  -------
+  aligned         104      100       96      300
+  omission        122      117      112      351
+  inversion       122      116      111      349
+  Fraction of drifted sources per record:
+  n=1000  min=0.000  p25=0.000  median=0.250  p75=0.333  p95=0.500  max=0.500  mean=0.231
+  Profile-source kind distribution:
+  source_kind         count       %
+  ----------------  -------  ------
+  atomic_nested        2515   42.0%
+  local_constraint     1912   31.9%
+  destination          1000   16.7%
+  atomic_top            396    6.6%
+  numeric_top           166    2.8%
+
+[7] Local-constraint (hard) coverage
+  Records with ≥1 hard constraint: 651 (65.1%)
+  lc_key            count       %
+  --------------  -------  ------
+  house rule          399   39.9%
+  room type           376   37.6%
+  cuisine             286   28.6%
+  transportation      231   23.1%
+
+[8] Feasibility gates
+  flight_only_feasible:
+  value    count       %
+  -----  -------  ------
+  False      509   50.9%
+  True       474   47.4%
+  None        17    1.7%
+  Budget multiplier (post-escalation):
+  n=1000  min=1.000×  p25=1.000×  median=1.000×  p75=1.000×  p95=1.332×  max=1.498×  mean=1.038×
+  Prehoc transport-cost / budget ratio:
+  n=983  min=0.000  p25=0.019  median=0.035  p75=0.091  p95=0.304  max=0.500  mean=0.077
+  Records exceeding 0.5×budget transport cap: 0
+  Records with per-city pool shortfalls: 0
+
+[9] Templated NL text (character counts)
+  templated_nl_profile length:
+  n=1000  min=89.000 ch  p25=240.000 ch  median=379.000 ch  p75=541.000 ch  p95=845.900 ch  max=1054.000 ch  mean=411.110 ch
+  Empty templated_nl_profile records: 0
+  templated_nl_query length:
+  n=1000  min=140.000 ch  p25=476.000 ch  median=643.500 ch  p75=819.000 ch  p95=1020.850 ch  max=1224.000 ch  mean=657.091 ch
+  Empty templated_nl_query records: 0
+

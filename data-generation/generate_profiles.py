@@ -1,4 +1,4 @@
-"""Per-query traceable persona generation.
+"""Per-query traceable profile generation.
 
 For every query in ``prefertripplan.jsonl`` we:
 
@@ -11,10 +11,10 @@ For every query in ``prefertripplan.jsonl`` we:
      becomes its own ``Source`` record and its own drift unit; same-value
      sources across paradigms share a ``(trait_table, trait_key)`` drift
      group so they drift in lockstep when picked.
-  2. Route each source through ``persona_traits`` to a trait table key.
+  2. Route each source through ``profile_traits`` to a trait table key.
      Numeric atomic sub-preds resolve their quartile (Q1 / Q2 / Q3) by
      walking the parent bank entry's ``example_values.default`` along
-     the source's path with ``persona_traits.quartile_at``.
+     the source's path with ``profile_traits.quartile_at``.
   3. Pick an aligned variant deterministically via ``pick_variant`` on
      ``(query_id, source descriptor)``.
   4. Assign ``drift_mode`` per query (aligned / omission / inversion)
@@ -24,9 +24,9 @@ For every query in ``prefertripplan.jsonl`` we:
      inversion variant in the same field.
 
 Output: each augmented record gains
-    ``persona``           — the trait-populated persona dict
-    ``persona_drift_mode``— "aligned" | "omission" | "inversion"
-    ``persona_trace``     — the full source provenance trail
+    ``profile``           — the trait-populated profile dict
+    ``profile_drift_mode``— "aligned" | "omission" | "inversion"
+    ``profile_trace``     — the full source provenance trail
 """
 from __future__ import annotations
 
@@ -43,12 +43,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-import persona_traits as PT
+import profile_traits as PT
 
 IN_PATH  = ROOT / "prefertripplan.jsonl"
 OUT_PATH = ROOT / "prefertripplan.jsonl"
 BANK_PATH = ROOT / "preference_bank.json"
-BACKUP   = ROOT / "prefertripplan.PRE_PERSONA.jsonl.bak"
+BACKUP   = ROOT / "prefertripplan.PRE_PROFILE.jsonl.bak"
 
 
 # --------------------------------------------------------------------------- #
@@ -549,7 +549,7 @@ def _substitute_roles(rationale: str, target_ctx: str) -> tuple[str, list[dict]]
 
 
 # --------------------------------------------------------------------------- #
-# NL persona + NL query renderers
+# NL profile + NL query renderers
 # --------------------------------------------------------------------------- #
 
 _FIELD_OPENERS = {
@@ -562,11 +562,11 @@ _FIELD_OPENERS = {
 }
 
 
-def render_nl_persona(rec: dict) -> str:
-    """Compose the single-user persona text from the persona dict
+def render_nl_profile(rec: dict) -> str:
+    """Compose the single-user profile text from the profile dict
     already attached to ``rec``.  Reads variant texts only — never bank
     rationale.  First-person voice, simple template per Interests field."""
-    p = rec.get("persona") or {}
+    p = rec.get("profile") or {}
     interests = p.get("Interests") or {}
     loc = (p.get("Demographics") or {}).get("Location") or rec.get("org") or "the area"
 
@@ -612,9 +612,9 @@ def _concession_prefix(category: str, all_drifted: bool) -> str:
 
 _ATTR_NL_ALIAS = {
     ("Accommodation", "rating"): "review_rate",
-    ("Accommodation", "cost"):   "price",
+    ("Accommodation", "cost"):   "cost",
     ("Restaurant",    "rating"): "aggregate_rating",
-    ("Restaurant",    "cost"):   "average_cost",
+    ("Restaurant",    "cost"):   "cost",
     ("Restaurant",    "cuisines"): "cuisine",
 }
 _OP_SYMBOL = {"==": "=", "!=": "≠", ">=": "≥", "<=": "≤",
@@ -675,12 +675,26 @@ def _fmt_lexicographic(tmpl: dict) -> str:
 
 
 def _fmt_compensatory(tmpl: dict) -> str:
+    """Render Compensatory with explicit scope tags on each slot so the
+    universal-primary/margin vs same-day-existential-secondary semantic
+    reads directly from the predicate literal.
+
+    Layout:
+        PRIMARY [scope: all]: <ideal>  |  MARGIN [scope: all]: <fallback>
+        |  SECONDARY [scope: any, same day]: <compensator>
+
+    meaning "every primary-entity item across the plan lands at Primary
+    (ideal) or in the Margin band (compensated by a same-day Secondary
+    satisfier)."
+    """
     p = tmpl.get("primary_ap")   or {}
     m = tmpl.get("margin_ap")    or {}
     s = tmpl.get("secondary_ap") or {}
-    return (f"PRIMARY: {_fmt_atomic(p, with_scope=False)} | "
-            f"MARGIN: {_fmt_atomic(m, with_scope=False)} | "
-            f"SECONDARY: {_fmt_atomic(s, with_scope=False)}")
+    return (
+        f"PRIMARY [scope: all]: {_fmt_atomic(p, with_scope=False)} | "
+        f"MARGIN [scope: all]: {_fmt_atomic(m, with_scope=False)} | "
+        f"SECONDARY [scope: any, same day]: {_fmt_atomic(s, with_scope=False)}"
+    )
 
 
 def _fmt_numeric(tmpl: dict) -> str:
@@ -846,9 +860,54 @@ def render_nl_query(rec: dict, trip_context: dict) -> tuple[str, list[dict]]:
         header = header[:-1] + f"; {lc_desc}."
     parts = [header]
 
+    # Per-person cost disclaimer: attach a single sentence when a preference
+    # literal references an entity.cost threshold so the number is read on the
+    # right basis.  Accommodation.cost is per-person per-night (see the
+    # per-person effective-cost transform in augment_preferences.build_query_db);
+    # Restaurant.cost follows the TravelPlanner Average-Cost convention
+    # (per-person per-meal).
+    _cost_hits = {"Accommodation": False, "Restaurant": False}
+    def _collect_cost_hits(node):
+        if isinstance(node, list):
+            for it in node:
+                _collect_cost_hits(it)
+            return
+        if not isinstance(node, dict):
+            return
+        ent = node.get("entity_type") or node.get("entity")
+        if node.get("attribute") == "cost" and ent in _cost_hits:
+            _cost_hits[ent] = True
+        # Recurse into all likely subtree fields (paradigm-specific: nested
+        # template wrapper for Scoped, children for Composite, condition/
+        # then_pref for Conditional, primary/margin/secondary for
+        # Compensatory, preferences for Lexicographic, inner + scope_filters
+        # for Scoped).
+        # Temporal uses subject_ap / reference_ap / target_ap; Scoped uses
+        # inner; Composite uses children; Compensatory uses primary/margin/
+        # secondary_ap; Conditional uses condition/then_pref; Lexicographic
+        # uses preferences.  Cover every wrapper key any paradigm nests
+        # atomic predicates under.
+        for k in ("template", "condition", "then_pref", "primary_ap",
+                  "margin_ap", "secondary_ap", "inner", "inner_pref",
+                  "subject_ap", "reference_ap", "target_ap"):
+            if node.get(k):
+                _collect_cost_hits(node.get(k))
+        _collect_cost_hits(node.get("children") or [])
+        _collect_cost_hits(node.get("preferences") or [])
+        _collect_cost_hits(node.get("scope_filters") or [])
+    for _pref in (rec.get("preferences") or []):
+        _collect_cost_hits(_pref.get("template") or {})
+    _cost_notes = []
+    if _cost_hits["Accommodation"]:
+        _cost_notes.append("accommodation cost is per person per night")
+    if _cost_hits["Restaurant"]:
+        _cost_notes.append("restaurant cost is per person per meal")
+    if _cost_notes:
+        parts.append("Note: " + "; ".join(_cost_notes) + ".")
+
     # Group sources by their owning preference for drift-state lookups.
     sources_by_pref: dict[tuple, list[dict]] = {}
-    for s in (rec.get("persona_trace") or {}).get("sources") or []:
+    for s in (rec.get("profile_trace") or {}).get("sources") or []:
         if s.get("kind") in ("destination", "local_constraint"):
             continue
         key = (s.get("paradigm"), s.get("op_name"), s.get("bank_id"))
@@ -940,7 +999,7 @@ ROOM_TYPE_NORMALIZE = {
 #   * local_constraint    : "no flight" | "no self-driving"  (avoidance)
 #   * preferences positive: ==/in {"self-driving","Flight","taxi"} or list
 #   * preferences avoidance: not_in/!= {"Flight","self-driving"}
-# The persona-trait table is anchored on the avoidance keys ("no flight",
+# The profile-trait table is anchored on the avoidance keys ("no flight",
 # "no self-driving").  Positive preferences are routed to the *inversion*
 # of the opposite avoidance trait — e.g. wanting self-driving = the
 # road-trip-loving inversion of the "no self-driving" avoidance trait.
@@ -966,12 +1025,12 @@ TRANSPORT_FROM_RAW_POSITIVE = {
 # --------------------------------------------------------------------------- #
 # Destination -> list of Preferred-Destination archetypes (up to 5 per
 # destination).  At source-emission time, ONE archetype is sampled
-# deterministically per query via persona_traits.pick_variant on the
+# deterministically per query via profile_traits.pick_variant on the
 # candidate list, so per-query reproducibility is preserved while
-# dataset-wide persona variety is widened.
+# dataset-wide profile variety is widened.
 #
 # Archetype vocabulary: 16 labels grounded in Table 7 of the
-# travelplanner-plus-persona-space PDF (excluding "European Cities" as
+# travelplanner-plus-profile-space PDF (excluding "European Cities" as
 # the corpus is US-only; merging "Tech Expos" into "Tech Conferences"
 # and "Countryside" into "Quiet Countryside").
 # --------------------------------------------------------------------------- #
@@ -1181,8 +1240,8 @@ class Source:
     op_name:      str | None        # only for TemporalPreference
     path:         tuple             # slot path within parent template
     raw_value:    Any               # the value(s) carried by this source
-    field:        str               # persona field this contributes to
-    trait_table:  str               # attribute name in persona_traits
+    field:        str               # profile field this contributes to
+    trait_table:  str               # attribute name in profile_traits
     trait_inversion_table: str      # inversion attribute name
     trait_key:    Any               # key into the trait dict
 
@@ -1239,7 +1298,7 @@ def _walk_atomic_positions(paradigm: str, template: dict) -> list[tuple[tuple, d
     """Return a list of (slot_path, atomic_dict) tuples — every atomic
     predicate location inside ``template`` for the given paradigm.
 
-    The slot_path matches what ``persona_traits.quartile_at`` expects on
+    The slot_path matches what ``profile_traits.quartile_at`` expects on
     the parent's ``example_values.default``.  The atomic_dict is always
     the unwrapped fields-dict (entity_type / attribute / op / value /
     scope at the top level).
@@ -1298,7 +1357,7 @@ def _walk_atomic_positions(paradigm: str, template: dict) -> list[tuple[tuple, d
         # NumericPreference inners are handled directly in
         # ``disintegrate`` (they don't decompose into atomic positions).
         # scope_filters are Day-attribute predicates and do not feed
-        # into persona traits.
+        # into profile traits.
         inner = t.get("inner") or {}
         inner_cls = inner.get("class")
         if inner_cls == "AtomicPreference":
@@ -1392,7 +1451,7 @@ def _emit_sources_for_atomic(
     # the trait_table differs (HOUSE_RULE_TRAITS for tolerant,
     # HOUSE_RULE_TRAITS_INVERSIONS for averse).  Same value with
     # different polarities lands in different drift groups, which is
-    # the desired behavior (they encode opposite persona signals).
+    # the desired behavior (they encode opposite profile signals).
     if (ent, attr) == ("Accommodation", "house_rules"):
         vs = val if isinstance(val, list) else ([val] if val else [])
         for raw_v in vs:
@@ -1843,16 +1902,16 @@ def apply_drift(sources: list[Source], query_id: int, mode: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Persona assembly
+# Profile assembly
 # --------------------------------------------------------------------------- #
 
-PERSONA_INTERESTS_FIELDS = (
+PROFILE_INTERESTS_FIELDS = (
     "Hobbies", "Lifestyle", "Travel Style",
     "Preferred Destinations", "Food and Dining Preferences",
     "Dislikes",
 )
 
-# Canonical persona-field placement, keyed by the trait table actually
+# Canonical profile-field placement, keyed by the trait table actually
 # used to pick the variant.  Drift inversion swaps the source from its
 # aligned table to its inversion table; the field follows the variant
 # (a positive-toned variant lands in the positive field, a Dislike-toned
@@ -1898,7 +1957,7 @@ _TABLE_FIELD_OVERRIDES = {
 
 
 def _effective_field(src: Source) -> str:
-    """Return the persona field where the source's currently-chosen
+    """Return the profile field where the source's currently-chosen
     variant should land — based on which trait table the variant came
     from.  Aligned variants come from ``src.trait_table``; inverted
     variants (under drift) come from ``src.trait_inversion_table``."""
@@ -1919,7 +1978,7 @@ def _pets_from_sources(sources: list[Source]) -> str | None:
       - Dropped (omission drift)      -> None (line is omitted).
       - No pets signal in the query   -> None (line is omitted).
     We never fabricate a "No pets." claim when the query is silent about
-    pets; silence in the query becomes silence in the persona.
+    pets; silence in the query becomes silence in the profile.
     """
     aligned_text: str | None = None
     inverted_text: str | None = None
@@ -1936,8 +1995,8 @@ def _pets_from_sources(sources: list[Source]) -> str | None:
     return inverted_text or aligned_text  # inversion wins if both somehow set
 
 
-def build_persona(rec: dict, sources: list[Source], drift_mode: str) -> dict:
-    persona = {
+def build_profile(rec: dict, sources: list[Source], drift_mode: str) -> dict:
+    profile = {
         "Demographics": {
             "Age Range":    "TBD",
             "Gender":       "TBD",
@@ -1960,23 +2019,23 @@ def build_persona(rec: dict, sources: list[Source], drift_mode: str) -> dict:
     }
     pets_line = _pets_from_sources(sources)
     if pets_line is not None:
-        persona["Pets"] = pets_line
+        profile["Pets"] = pets_line
     for s in sources:
         if s.drift_action == "drop" or not s.variant_text:
             continue
         field = _effective_field(s)
-        if field in persona["Interests"]:
-            persona["Interests"][field].append(s.variant_text)
+        if field in profile["Interests"]:
+            profile["Interests"][field].append(s.variant_text)
     # De-duplicate each field, preserving first-seen order
-    for f in persona["Interests"]:
+    for f in profile["Interests"]:
         seen = set()
         uniq = []
-        for t in persona["Interests"][f]:
+        for t in profile["Interests"][f]:
             if t not in seen:
                 seen.add(t)
                 uniq.append(t)
-        persona["Interests"][f] = uniq
-    return persona
+        profile["Interests"][f] = uniq
+    return profile
 
 
 def _source_to_trace_dict(s: Source) -> dict:
@@ -2019,12 +2078,12 @@ def main():
     # Assign drift modes (stratified per level)
     drift_modes = assign_drift_modes(records)
 
-    # Build per-query personas
+    # Build per-query profiles
     out_records: list[dict] = []
     src_counter   = Counter()       # diagnostic: sources per source-kind
     field_counter = Counter()       # diagnostic: signals per field
     drift_dist    = defaultdict(Counter)
-    empty_persona_qids: list[int] = []
+    empty_profile_qids: list[int] = []
 
     for rec in records:
         qid = rec["query_id"]
@@ -2039,10 +2098,10 @@ def main():
         mode = drift_modes[qid]
         drift_meta = apply_drift(sources, qid, mode)
 
-        # Assemble persona
-        persona = build_persona(rec, sources, mode)
-        if all(len(v) == 0 for k, v in persona["Interests"].items()):
-            empty_persona_qids.append(qid)
+        # Assemble profile
+        profile = build_profile(rec, sources, mode)
+        if all(len(v) == 0 for k, v in profile["Interests"].items()):
+            empty_profile_qids.append(qid)
 
         # Telemetry
         drift_dist[level][mode] += 1
@@ -2051,24 +2110,24 @@ def main():
             field_counter[s.field] += 1
 
         rec_out = dict(rec)
-        rec_out["persona"] = persona
-        rec_out["persona_drift_mode"] = mode
-        rec_out["persona_trace"] = {
+        rec_out["profile"] = profile
+        rec_out["profile_drift_mode"] = mode
+        rec_out["profile_trace"] = {
             "drift_meta": drift_meta,
             "sources":    [_source_to_trace_dict(s) for s in sources],
         }
 
         # ----- NL generation ---------------------------------------------
         trip_context = resolve_trip_context(rec_out)
-        templated_persona  = render_nl_persona(rec_out)
+        templated_profile  = render_nl_profile(rec_out)
         templated_query, nl_render_log = render_nl_query(rec_out, trip_context)
         rec_out["trip_context"]          = trip_context
-        rec_out["templated_nl_persona"]  = templated_persona
+        rec_out["templated_nl_profile"]  = templated_profile
         rec_out["templated_nl_query"]    = templated_query
         rec_out["nl_render_log"]         = nl_render_log
 
         # Drop legacy field names carried over from prior runs of this script
-        for legacy in ("nl_persona", "nl_query"):
+        for legacy in ("nl_profile", "nl_query"):
             rec_out.pop(legacy, None)
 
         out_records.append(rec_out)
@@ -2077,7 +2136,7 @@ def main():
     print("\n=== Source kinds ===")
     for k, n in src_counter.most_common():
         print(f"  {k:20s} {n}")
-    print("\n=== Persona field signal counts ===")
+    print("\n=== Profile field signal counts ===")
     for f, n in field_counter.most_common():
         print(f"  {f:30s} {n}")
     print("\n=== Drift mode distribution by level ===")
@@ -2087,9 +2146,9 @@ def main():
         print(f"  {level:6s} (n={tot:4d})  "
               + "  ".join(f"{m}={row[m]} ({row[m]/tot:5.1%})"
                           for m in ("aligned", "omission", "inversion")))
-    print(f"\nQueries with empty persona (no Interests signals): {len(empty_persona_qids)}")
-    if empty_persona_qids[:5]:
-        print(f"  example qids: {empty_persona_qids[:10]}")
+    print(f"\nQueries with empty profile (no Interests signals): {len(empty_profile_qids)}")
+    if empty_profile_qids[:5]:
+        print(f"  example qids: {empty_profile_qids[:10]}")
 
     # Backup + write
     if not BACKUP.exists():
@@ -2098,7 +2157,7 @@ def main():
     with OUT_PATH.open("w") as f:
         for rec in out_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"Wrote {len(out_records)} records with persona to {OUT_PATH.name}")
+    print(f"Wrote {len(out_records)} records with profile to {OUT_PATH.name}")
 
 
 if __name__ == "__main__":

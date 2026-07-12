@@ -1933,7 +1933,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -1941,7 +1941,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -1972,7 +1972,7 @@
           "attribute": "cost",
           "op": "<=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -1980,7 +1980,7 @@
           "attribute": "cost",
           "op": "<=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2011,7 +2011,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2019,7 +2019,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2050,7 +2050,7 @@
           "attribute": "cuisine",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2058,7 +2058,7 @@
           "attribute": "cuisine",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2089,7 +2089,7 @@
           "attribute": "mode",
           "op": "==",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2097,7 +2097,7 @@
           "attribute": "mode",
           "op": "==",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2128,7 +2128,7 @@
           "attribute": "category",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2136,7 +2136,7 @@
           "attribute": "category",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2167,7 +2167,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2175,7 +2175,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2206,7 +2206,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2214,7 +2214,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2245,7 +2245,7 @@
           "attribute": "cuisine",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2253,7 +2253,7 @@
           "attribute": "cuisine",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2284,7 +2284,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2292,7 +2292,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2323,7 +2323,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2331,7 +2331,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2362,7 +2362,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2370,7 +2370,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2401,7 +2401,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2409,7 +2409,7 @@
           "attribute": "rating",
           "op": ">=",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",
@@ -2440,7 +2440,7 @@
           "attribute": "category",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "margin_ap": {
           "class": "AtomicPreference",
@@ -2448,7 +2448,7 @@
           "attribute": "category",
           "op": "in",
           "value": null,
-          "scope": "any"
+          "scope": "all"
         },
         "secondary_ap": {
           "class": "AtomicPreference",

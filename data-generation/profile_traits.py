@@ -1,11 +1,11 @@
-"""Multi-variant trait tables for traceable persona generation.
+"""Multi-variant trait tables for traceable profile generation.
 
 Each "signal" (a constraint value, an attraction category, a numeric
-optimization direction, etc.) maps to a list of natural-language persona
+optimization direction, etc.) maps to a list of natural-language profile
 trait descriptions: 10 aligned variants and 5 inversion variants.  The
-persona generator picks one variant per signal deterministically via a
+profile generator picks one variant per signal deterministically via a
 hash of (query_id, source descriptor), so the same query always produces
-the same persona but the dataset as a whole has phrasing diversity.
+the same profile but the dataset as a whole has phrasing diversity.
 
 Signal vocabularies are FIXED to what actually appears in the data:
   cuisines (9)             — Italian, Mexican, French, Chinese, Indian,
@@ -920,7 +920,7 @@ NUMERIC_DIRECTION_TRAITS = {
         "Prefers minimalist, unfussy accommodation experiences.",
     ],
     ("Accommodation", "cost", "max"): [
-        "Comfortable with premium accommodation pricing.",
+        "Comfortable with premium accommodation pricing per person per night.",
         "Drawn to luxury hotels and resort-style lodging.",
         "Values polished, full-service properties at premium tiers.",
         "Prefers boutique hotels and high-end vacation rentals.",
@@ -928,11 +928,11 @@ NUMERIC_DIRECTION_TRAITS = {
         "Drawn to luxury resorts and signature hospitality brands.",
         "Values the indulgence of high-end accommodation.",
         "Prefers premium lodging with full-service amenities.",
-        "Comfortable with high-end hotel pricing for quality.",
+        "Comfortable with high-end per-person nightly rates for quality.",
         "Drawn to flagship luxury properties and resort destinations.",
     ],
     ("Accommodation", "cost", "min"): [
-        "Budget-conscious traveler; minimizes accommodation spend.",
+        "Budget-conscious traveler; minimizes per-person nightly accommodation spend.",
         "Drawn to affordable hostels, motels, and inexpensive lodgings.",
         "Values cost savings on rooms to spend more on experiences.",
         "Comfortable in low-cost accommodations to extend travel budget.",
@@ -940,7 +940,7 @@ NUMERIC_DIRECTION_TRAITS = {
         "Drawn to budget-tier hotels and discount lodging deals.",
         "Believes accommodation is a place to sleep, not splurge on.",
         "Values economical lodging for longer or more frequent trips.",
-        "Comfortable in basic budget properties.",
+        "Comfortable in basic budget properties at low per-person nightly rates.",
         "Drawn to value-oriented lodging choices.",
     ],
 
@@ -1061,18 +1061,18 @@ NUMERIC_DIRECTION_TRAITS_INVERSIONS = {
         "Won't compromise on accommodation quality.",
     ],
     ("Accommodation", "cost", "max"): [
-        "Avoids premium lodging; values cost savings.",
+        "Avoids premium per-person nightly lodging; values cost savings.",
         "Doesn't enjoy luxury hotels; finds them ostentatious.",
         "Prefers economical accommodation choices.",
         "Finds high-end lodging wasteful for short stays.",
-        "Won't pay premium prices for accommodation.",
+        "Won't pay premium per-person nightly prices for accommodation.",
     ],
     ("Accommodation", "cost", "min"): [
         "Doesn't prioritize budget lodging; values quality.",
         "Avoids hostels and economy properties.",
-        "Believes accommodation is worth investing in.",
+        "Believes accommodation is worth investing in even at higher per-person nightly rates.",
         "Finds cheap lodging unpleasant and noisy.",
-        "Prefers full-service hotels even at premium cost.",
+        "Prefers full-service hotels even at premium per-person nightly cost.",
     ],
     ("Restaurant", "rating", "max"): [
         "Doesn't prioritize restaurant ratings; comfortable in basic eateries.",
@@ -1154,52 +1154,52 @@ NUMERIC_DIRECTION_TRAITS_INVERSIONS = {
 
 ATOMIC_NUMERIC_TRAITS = {
     ("Accommodation", "cost", "<=", "Q1"): [
-        "Books lodging at the cheap end of the local market.",
-        "Caps room spend at budget-tier rates everywhere they go.",
+        "Books lodging at the cheap end of the local per-person nightly market.",
+        "Caps room spend at budget-tier per-person nightly rates everywhere they go.",
         "Treats accommodation as a place to sleep, not splurge on.",
-        "Hunts down the lowest viable nightly rate in each city.",
+        "Hunts down the lowest viable per-person nightly rate in each city.",
         "Sticks to hostel- and motel-tier lodging to free cash for the trip.",
-        "Avoids paying more than the bottom of the price range for a room.",
-        "Optimizes the lodging line item hard; aims for rock-bottom prices.",
+        "Avoids paying more than the bottom of the per-person nightly price range for a room.",
+        "Optimizes the lodging line item hard; aims for rock-bottom per-person nightly prices.",
         "Considers hotels above budget-tier a poor use of trip money.",
         "Plans around the cheapest available rooms first, then everything else.",
         "Prefers basic, low-cost rooms over amenities or polish.",
     ],
     ("Accommodation", "cost", "<=", "Q2"): [
-        "Keeps lodging spend in the middle of the local market.",
+        "Keeps per-person nightly lodging spend in the middle of the local market.",
         "Targets mid-range hotels — not bargain, not boutique.",
         "Balances comfort and cost on the room line; mid-tier suits them.",
         "Books moderately-priced rooms without going premium.",
         "Avoids both bottom-tier dives and luxury overspend on lodging.",
-        "Caps lodging cost at the median rate for the city.",
-        "Pays standard mid-market hotel rates; no need for luxury.",
-        "Sits in the middle of the price range for accommodation.",
+        "Caps per-person nightly lodging cost at the median rate for the city.",
+        "Pays standard mid-market per-person nightly hotel rates; no need for luxury.",
+        "Sits in the middle of the per-person nightly price range for accommodation.",
         "Picks mid-priced rooms as the comfortable balance.",
-        "Considers median accommodation rates the natural spend.",
+        "Considers median per-person nightly accommodation rates the natural spend.",
     ],
     ("Accommodation", "cost", "<=", "Q3"): [
         "Doesn't sweat lodging costs — anything up to upscale is fine.",
-        "Loose price ceiling on rooms; only blocks truly extravagant spend.",
-        "Comfortable paying through to the upper-tier rate on accommodation.",
+        "Loose per-person nightly ceiling on rooms; only blocks truly extravagant spend.",
+        "Comfortable paying through to the upper-tier per-person nightly rate on accommodation.",
         "Books across the price range without picking the absolute cheapest.",
         "Cost-tolerant on lodging — willing to go up to high-end but not exceed it.",
-        "Caps the room budget at the high end of the market, no further.",
-        "Accommodation spend is flexible up to the upscale-but-not-luxury tier.",
+        "Caps the room budget at the high end of the per-person nightly market, no further.",
+        "Accommodation spend is flexible up to the upscale-but-not-luxury per-person nightly tier.",
         "Open to most lodging tiers as long as it stops short of luxury extremes.",
         "Will spend up to but not beyond the upper bracket on rooms.",
         "Price-flexible across nearly all lodging tiers.",
     ],
     ("Accommodation", "cost", ">=", "Q3"): [
-        "Strongly prefers premium-priced lodging — luxury or near-luxury.",
+        "Strongly prefers premium per-person nightly lodging — luxury or near-luxury.",
         "Splurges on top-bracket hotels and resort properties.",
-        "Floor on room rates sits at the upscale end of the market.",
-        "Books primarily in the high-cost tier for accommodations.",
+        "Floor on per-person nightly room rates sits at the upscale end of the market.",
+        "Books primarily in the high-cost per-person nightly tier for accommodations.",
         "Treats premium spend on rooms as part of the experience.",
         "Aims to stay at the upscale tier for lodging in most cities.",
-        "Considers high accommodation spend a signal of trip quality.",
+        "Considers high per-person nightly accommodation spend a signal of trip quality.",
         "Picks expensive rooms by design, not by accident.",
-        "Sets a premium spending floor on every room booked.",
-        "Drawn to the top of the local accommodation price range.",
+        "Sets a premium per-person nightly spending floor on every room booked.",
+        "Drawn to the top of the local per-person nightly accommodation price range.",
     ],
 
     ("Accommodation", "rating", ">=", "Q2"): [
@@ -1415,30 +1415,30 @@ ATOMIC_NUMERIC_TRAITS = {
 
 ATOMIC_NUMERIC_TRAITS_INVERSIONS = {
     ("Accommodation", "cost", "<=", "Q1"): [
-        "Won't compromise on hotels; comfortable spending above budget-tier.",
+        "Won't compromise on hotels; comfortable spending above budget-tier per-person nightly rates.",
         "Avoids cheap rooms; finds them noisy and unpleasant.",
         "Prefers paying for amenities rather than the bottom rate.",
-        "Believes accommodation is worth investing in.",
+        "Believes accommodation is worth investing in at higher per-person nightly rates.",
         "Books mid- or upper-tier hotels even on tight budgets.",
     ],
     ("Accommodation", "cost", "<=", "Q2"): [
-        "Skips mid-tier rooms; books either rock-bottom or upscale.",
+        "Skips mid-tier per-person nightly rooms; books either rock-bottom or upscale.",
         "Finds the middle of the lodging market dull — needs an extreme.",
         "Won't settle for moderately-priced hotels; goes high or low.",
         "Bimodal on rooms — either budget hostels or luxury suites.",
-        "Avoids median-priced accommodations on principle.",
+        "Avoids median per-person nightly accommodation prices on principle.",
     ],
     ("Accommodation", "cost", "<=", "Q3"): [
-        "Keeps lodging spend tight; wouldn't touch upper-tier rates.",
+        "Keeps lodging spend tight; wouldn't touch upper-tier per-person nightly rates.",
         "Sensitive about hotel costs — even mid-upper bracket feels wasteful.",
         "Caps room spend well below the upscale tier.",
-        "Refuses to pay close to top-bracket rates for accommodation.",
+        "Refuses to pay close to top-bracket per-person nightly rates for accommodation.",
         "Avoids any room that strays toward the upper end of the market.",
     ],
     ("Accommodation", "cost", ">=", "Q3"): [
         "Never books premium hotels; finds luxury wasteful.",
         "Avoids high-end lodging entirely; sticks to budget tiers.",
-        "Won't pay luxury rates for somewhere to sleep.",
+        "Won't pay luxury per-person nightly rates for somewhere to sleep.",
         "Considers upscale accommodation indulgent and pointless.",
         "Books cheap rooms even when budget allows premium.",
     ],
