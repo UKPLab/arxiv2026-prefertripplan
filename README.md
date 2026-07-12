@@ -38,7 +38,7 @@ Clone the repo and set up a Python 3.10 virtual environment:
 
 ```bash
 git clone https://github.com/UKPLab/arxiv2026-prefertripplan.git
-cd arxiv2026-prefertripplan
+cd data-generation
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
