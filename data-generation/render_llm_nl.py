@@ -629,9 +629,16 @@ Write the trip request now as ONE or TWO flowing paragraphs. Output only the mes
 # --------------------------------------------------------------------------- #
 
 class Backend:
-    """Abstract base. ``generate_batch`` returns one text per prompt."""
+    """Abstract base. ``generate_batch`` returns one text per prompt.
+
+    ``on_result`` is an optional per-completion callback: as soon as a
+    single prompt finishes, backends invoke it with ``(index, text)``
+    so the caller can persist the result to disk immediately.  This
+    makes Ctrl-C interruptions non-destructive -- everything completed
+    up to that point has already been written."""
     name: str = "abstract"
-    def generate_batch(self, prompts: list[str], *, max_tokens: int) -> list[str]:
+    def generate_batch(self, prompts: list[str], *, max_tokens: int,
+                       on_result=None) -> list[str]:
         raise NotImplementedError
 
 
@@ -639,24 +646,65 @@ class AnthropicBackend(Backend):
     name = "anthropic"
     def __init__(self, model: str, workers: int = 8):
         import anthropic
-        self.client     = anthropic.Anthropic()
+        # Disable SDK internal retries so `_one` handles 429s visibly.
+        # Cap the per-request timeout so stuck sockets can't stall a
+        # worker indefinitely.
+        self.client     = anthropic.Anthropic(max_retries=0, timeout=120.0)
         self.model      = model
         self.workers    = workers
 
     def _one(self, prompt: str, max_tokens: int) -> str:
-        msg = self.client.messages.create(
-            model       = self.model,
-            max_tokens  = max_tokens,
-            temperature = TEMPERATURE,
-            messages    = [{"role": "user", "content": prompt}],
-        )
-        out = []
-        for b in msg.content:
-            if getattr(b, "type", None) == "text":
-                out.append(b.text)
-        return "".join(out).strip()
+        """Single Anthropic call with explicit rate-limit handling.
 
-    def generate_batch(self, prompts, *, max_tokens):
+        See OpenAIBackend._one for the rationale -- Anthropic's SDK also
+        retries 429s silently under the hood.  Surface the wait to the
+        user so a stalled progress bar has an explanation.
+        """
+        import re as _re, time as _time, sys as _sys, random as _random
+        from anthropic import RateLimitError, APITimeoutError, APIConnectionError
+
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            try:
+                msg = self.client.messages.create(
+                    model       = self.model,
+                    max_tokens  = max_tokens,
+                    temperature = TEMPERATURE,
+                    messages    = [{"role": "user", "content": prompt}],
+                )
+                out = []
+                for b in msg.content:
+                    if getattr(b, "type", None) == "text":
+                        out.append(b.text)
+                return "".join(out).strip()
+            except RateLimitError as e:
+                # Anthropic surfaces a retry-after header when available.
+                retry_after = None
+                resp = getattr(e, "response", None)
+                if resp is not None and hasattr(resp, "headers"):
+                    try:
+                        retry_after = float(resp.headers.get("retry-after") or 0)
+                    except (TypeError, ValueError):
+                        retry_after = None
+                wait = retry_after if retry_after else min(60.0, 2 ** attempt)
+                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
+                print(f"\n[rate-limit] anthropic 429   sleeping {wait:.2f}s "
+                      f"(attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+            except (APITimeoutError, APIConnectionError) as e:
+                wait = min(30.0, 2 ** attempt)
+                print(f"\n[api-transient] {type(e).__name__}: "
+                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+        print(f"\n[error] Anthropic call failed after {max_attempts} attempts; skipping.",
+              file=_sys.stderr, flush=True)
+        return ""
+
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         results = [None] * len(prompts)
         reporter = _ProgressReporter(len(prompts),
                                      label=f"anthropic ({self.workers}w)")
@@ -665,7 +713,17 @@ class AnthropicBackend(Backend):
                 futs = {ex.submit(self._one, p, max_tokens): i
                         for i, p in enumerate(prompts)}
                 for f in as_completed(futs):
-                    results[futs[f]] = f.result()
+                    idx = futs[f]
+                    try:
+                        text = f.result()
+                    except Exception as e:
+                        text = ""
+                    results[idx] = text
+                    if on_result is not None and text:
+                        try:
+                            on_result(idx, text)
+                        except Exception:
+                            pass
                     reporter.step()
         finally:
             reporter.close()
@@ -682,20 +740,78 @@ class OpenAIBackend(Backend):
             kwargs["base_url"] = base_url
         if api_key is not None:
             kwargs["api_key"] = api_key
+        # Disable the SDK's internal silent retry — we surface 429s
+        # explicitly in `_one` so the progress bar can log the wait.
+        # Also cap per-request timeout so a stuck connection can't
+        # freeze a worker forever.
+        kwargs["max_retries"] = 0
+        kwargs["timeout"] = 120.0
         self.client  = OpenAI(**kwargs)
         self.model   = model
         self.workers = workers
 
     def _one(self, prompt: str, max_tokens: int) -> str:
-        resp = self.client.chat.completions.create(
-            model       = self.model,
-            messages    = [{"role": "user", "content": prompt}],
-            temperature = TEMPERATURE,
-            max_completion_tokens  = max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
+        """Single OpenAI call with EXPLICIT rate-limit handling.
 
-    def generate_batch(self, prompts, *, max_tokens):
+        The default OpenAI SDK retries 429s internally with exponential
+        backoff -- silently, from the caller's POV.  On a heavily-loaded
+        run that looks like the process 'stalled' for tens of seconds
+        with no output.  We short-circuit that by catching RateLimitError
+        directly, parsing the server's suggested wait, logging it to
+        stderr so the user sees why the progress bar isn't advancing,
+        and retrying.
+        """
+        import re as _re, time as _time, sys as _sys
+        from openai import RateLimitError, APITimeoutError, APIConnectionError
+
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            try:
+                resp = self.client.chat.completions.create(
+                    model       = self.model,
+                    messages    = [{"role": "user", "content": prompt}],
+                    temperature = TEMPERATURE,
+                    max_completion_tokens  = max_tokens,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except RateLimitError as e:
+                msg = str(getattr(e, "message", e))
+                # Try to extract "Please try again in Xms" or "Xs".
+                m = _re.search(r"try again in\s+([\d.]+)\s*(ms|s|m)", msg)
+                if m:
+                    v = float(m.group(1)); unit = m.group(2)
+                    wait = v/1000.0 if unit == "ms" else (v*60.0 if unit == "m" else v)
+                else:
+                    wait = min(60.0, 2 ** attempt)
+                # Small jitter + a floor so many workers don't wake up
+                # exactly together and re-trigger the same limit.
+                import random as _random
+                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
+                # Trim the 4× wordier SDK message down to the diagnostic
+                # essentials: which limit, how much used, wait duration.
+                short = msg
+                lim = _re.search(r"Limit\s+(\d+)", short)
+                usd = _re.search(r"Used\s+(\d+)", short)
+                req = _re.search(r"Requested\s+(\d+)", short)
+                brief = f"limit={lim.group(1) if lim else '?'} used={usd.group(1) if usd else '?'} req={req.group(1) if req else '?'}" if (lim or usd or req) else short[:80]
+                print(f"\n[rate-limit] {brief}   sleeping {wait:.2f}s "
+                      f"(attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+            except (APITimeoutError, APIConnectionError) as e:
+                wait = min(30.0, 2 ** attempt)
+                print(f"\n[api-transient] {type(e).__name__}: "
+                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+        # All retries exhausted
+        print(f"\n[error] OpenAI call failed after {max_attempts} attempts; skipping.",
+              file=_sys.stderr, flush=True)
+        return ""
+
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         results = [None] * len(prompts)
         reporter = _ProgressReporter(len(prompts),
                                      label=f"openai ({self.workers}w)")
@@ -704,7 +820,17 @@ class OpenAIBackend(Backend):
                 futs = {ex.submit(self._one, p, max_tokens): i
                         for i, p in enumerate(prompts)}
                 for f in as_completed(futs):
-                    results[futs[f]] = f.result()
+                    idx = futs[f]
+                    try:
+                        text = f.result()
+                    except Exception as e:
+                        text = ""
+                    results[idx] = text
+                    if on_result is not None and text:
+                        try:
+                            on_result(idx, text)
+                        except Exception:
+                            pass
                     reporter.step()
         finally:
             reporter.close()
@@ -736,7 +862,7 @@ class VLLMOfflineBackend(Backend):
             **extra,
         )
 
-    def generate_batch(self, prompts, *, max_tokens):
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         from vllm import SamplingParams
         sp = SamplingParams(
             temperature = TEMPERATURE,
@@ -747,7 +873,18 @@ class VLLMOfflineBackend(Backend):
         outputs = self.llm.chat(conversations, sampling_params=sp,
                                 use_tqdm=True)
         # vLLM returns RequestOutput in the same order as prompts.
-        return [o.outputs[0].text.strip() for o in outputs]
+        texts = [o.outputs[0].text.strip() for o in outputs]
+        # vLLM batches internally, so we can only fire on_result after
+        # the whole batch completes.  Still, this saves everything to
+        # cache on run end (before any downstream merge step).
+        if on_result is not None:
+            for i, t in enumerate(texts):
+                if t:
+                    try:
+                        on_result(i, t)
+                    except Exception:
+                        pass
+        return texts
 
 
 def make_backend(name: str, model: str, *,
@@ -927,8 +1064,17 @@ def _load_cache(cache_path: Path) -> dict:
 
 
 def _append_cache(qid: int, kind: str, text: str, cache_path: Path) -> None:
+    # Open in append mode with line-buffering; flush + fsync so a Ctrl-C
+    # or a stalled request that gets killed by the user leaves every
+    # already-completed prompt safely on disk.
     with cache_path.open("a") as f:
         f.write(json.dumps({"qid": qid, "kind": kind, "text": text}) + "\n")
+        f.flush()
+        try:
+            import os as _os
+            _os.fsync(f.fileno())
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -971,19 +1117,35 @@ def generate_all(records: list[dict], backend: Backend, cache_path: Path, *,
     prompts    = [p for (_, _, p, _) in pending]
     max_tokens = max(mt for (_, _, _, mt) in pending)
 
+    # Serialize cache writes across worker threads so appends can't
+    # interleave partial JSON lines on disk.
+    import threading
+    _cache_lock = threading.Lock()
+
+    def _persist(index: int, text: str) -> None:
+        """Called from the backend as soon as prompt ``index`` finishes.
+        Appends the result to the cache file immediately -- so any
+        Ctrl-C partway through leaves every completed prompt on disk."""
+        qid, kind, _, _ = pending[index]
+        with _cache_lock:
+            _append_cache(qid, kind, text, cache_path)
+
     t0 = time.time()
     if verbose:
         print(f"[run] dispatching {len(prompts)} prompts...")
-    texts = backend.generate_batch(prompts, max_tokens=max_tokens)
+    try:
+        texts = backend.generate_batch(prompts, max_tokens=max_tokens,
+                                        on_result=_persist)
+    except KeyboardInterrupt:
+        # backends may not fully drain futures on Ctrl-C; the cache
+        # holds whatever _persist saw before the interrupt.
+        print(f"\n[run] interrupted; cache holds all completions so far",
+              file=sys.stderr)
+        raise
     dt = time.time() - t0
     if verbose:
         print(f"[run] generated {len(texts)} texts in {dt:.1f}s "
               f"({len(texts)/max(dt, 1e-6):.2f} prompts/sec)")
-
-    # Save to cache
-    for (qid, kind, _, _), text in zip(pending, texts):
-        if text:
-            _append_cache(qid, kind, text, cache_path)
 
 
 def merge_into_jsonl(records: list[dict], in_path: Path, out_path: Path,
