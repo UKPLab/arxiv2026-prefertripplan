@@ -10,11 +10,11 @@ For every record it asks a planner LLM to produce a full trip plan.
 Prompt: ``PLANNER_INSTRUCTION`` from the original TravelPlanner project's
 ``agents/prompts.py`` (sole-planning setup) is reused VERBATIM.  The
 only change we make is a single added line in the template's tail so
-the traveler's persona is surfaced alongside the query:
+the traveler's profile is surfaced alongside the query:
 
     ...
     Given information: {text}
-    Traveler persona: {persona}     <-- one line added for PreferTripPlan
+    Traveler profile: {profile}     <-- one line added for PreferTripPlan
     Query: {query}
     Travel Plan:
 
@@ -26,7 +26,7 @@ Accommodation) so downstream evaluators built for TravelPlanner consume
 PreferTripPlan plans without adaptation.
 
 Three fields per HF record are consumed:
-    persona                -- fluent first-person persona introduction
+    profile                -- fluent first-person profile introduction
     query                  -- fluent trip-request message
     reference_information  -- JSON-serialised list of candidate-pool blocks
 
@@ -44,7 +44,7 @@ models don't clobber each other's caches.
 
 Output: JSONL at ``--out`` (default:
 ``plan-generation/plans_<backend>_<model>.jsonl``) with, per row,
-``{"idx", "persona", "query", "reference_information", "llm_travel_plan"}``.
+``{"idx", "profile", "query", "reference_information", "llm_travel_plan"}``.
 The input HF dataset is treated as read-only.
 
 Usage:
@@ -128,9 +128,59 @@ class _ProgressReporter:
 
 # --------------------------------------------------------------------------- #
 # PLANNER_INSTRUCTION -- verbatim from OSU-NLP-Group/TravelPlanner            #
-# agents/prompts.py  (only the tail line is extended to carry `persona`).     #
+# agents/prompts.py  (only the tail line is extended to carry `profile`).     #
 # --------------------------------------------------------------------------- #
-_PLANNER_INSTRUCTION_TP = """You are a proficient planner. Based on the provided information and query, please give me a detailed plan, including specifics such as flight numbers (e.g., F0123456), restaurant names, and accommodation names. Note that all the information in your plan should be derived from the provided data. You must adhere to the format given in the example. Additionally, all details should align with commonsense. The symbol '-' indicates that information is unnecessary. For example, in the provided sample, you do not need to plan after returning to the departure city. When you travel to two cities in one day, you should note it in the 'Current City' section as in the example (i.e., from A to B). For any day with multiple attractions, the order in which they appear in the "Attraction" line reflects the order they are visited.
+# _PLANNER_INSTRUCTION_TP = """You are a proficient planner. Based on the provided information and query, please give me a detailed plan, including specifics such as flight numbers (e.g., F0123456), restaurant names, and accommodation names. Note that all the information in your plan should be derived from the provided data. You must adhere to the format given in the example. Additionally, all details should align with commonsense. The symbol '-' indicates that information is unnecessary. For example, in the provided sample, you do not need to plan after returning to the departure city. When you travel to two cities in one day, you should note it in the 'Current City' section as in the example (i.e., from A to B).
+
+# ***** Example *****
+# Query: Could you create a travel plan for 7 people from Ithaca to Charlotte spanning 3 days, from March 8th to March 10th, 2025, with a budget of $30,200?
+# Travel Plan:
+# Day 1:
+# Current City: from Ithaca to Charlotte
+# Transportation: Flight Number: F3633413, from Ithaca to Charlotte, Departure Time: 05:38, Arrival Time: 07:46
+# Breakfast: Nagaland's Kitchen, Charlotte
+# Attraction: The Charlotte Museum of History, Charlotte
+# Lunch: Cafe Maple Street, Charlotte
+# Dinner: Bombay Vada Pav, Charlotte
+# Accommodation: Affordable Spacious Refurbished Room in Bushwick!, Charlotte
+
+# Day 2:
+# Current City: Charlotte
+# Transportation: -
+# Breakfast: Olive Tree Cafe, Charlotte
+# Attraction: The Mint Museum, Charlotte;Romare Bearden Park, Charlotte.
+# Lunch: Birbal Ji Dhaba, Charlotte
+# Dinner: Pind Balluchi, Charlotte
+# Accommodation: Affordable Spacious Refurbished Room in Bushwick!, Charlotte
+
+# Day 3:
+# Current City: from Charlotte to Ithaca
+# Transportation: Flight Number: F3786167, from Charlotte to Ithaca, Departure Time: 21:42, Arrival Time: 23:26
+# Breakfast: Subway, Charlotte
+# Attraction: Books Monument, Charlotte.
+# Lunch: Olive Tree Cafe, Charlotte
+# Dinner: Kylin Skybar, Charlotte
+# Accommodation: -
+
+# ***** Example Ends *****
+
+# Given information: {text}
+# Query: {query}
+# Travel Plan:"""
+
+# # PreferTripPlan modification: one added line for the traveler profile,
+# # inserted immediately before the "Query: ..." line.  Everything above
+# # (the instructions + Ithaca/Charlotte example) is TravelPlanner-verbatim.
+# _TP_TAIL   = "Given information: {text}\nQuery: {query}\nTravel Plan:"
+# _PTP_TAIL  = ("Given information: {text}\n"
+#               "Traveler profile: {profile}\n"
+#               "Query: {query}\n"
+#               "Travel Plan:")
+# PLANNER_INSTRUCTION_PTP = _PLANNER_INSTRUCTION_TP.replace(_TP_TAIL, _PTP_TAIL)
+# assert _PTP_TAIL in PLANNER_INSTRUCTION_PTP, "prompt-tail surgery failed"
+
+# Adapted from TravelPlanner+ (Table 9)
+PLANNER_INSTRUCTION_PTP = """You are a proficient planner with a keen understanding of personal preferences and styles. Based on the provided information, user profile, and query, please give me a detailed and personalized plan, including specifics such as flight numbers (e.g., F0123456), restaurant names, and accommodation . Note that all the information in your plan should be derived from the provided data and aligned with the profile details. You must adhere to the format given in the example. Additionally, all details should align with common sense. The symbol '-' indicates that information is unnecessary. For example, in the provided sample, you do not need to plan after returning to the departure city. When you travel to two cities in one day, you should note it in the 'Current City' section as in the example (i.e., from A to B). Always prioritize the query constraints first, especially when they conflict with user profiles. Incorporate personal preferences based on user profiles as secondary considerations.
 
 ***** Example *****
 Query: Could you create a travel plan for 7 people from Ithaca to Charlotte spanning 3 days, from March 8th to March 10th, 2025, with a budget of $30,200?
@@ -165,19 +215,12 @@ Accommodation: -
 ***** Example Ends *****
 
 Given information: {text}
-Query: {query}
-Travel Plan:"""
 
-# PreferTripPlan modification: one added line for the traveler persona,
-# inserted immediately before the "Query: ..." line.  Everything above
-# (the instructions + Ithaca/Charlotte example) is TravelPlanner-verbatim.
-_TP_TAIL   = "Given information: {text}\nQuery: {query}\nTravel Plan:"
-_PTP_TAIL  = ("Given information: {text}\n"
-              "Traveler persona: {persona}\n"
-              "Query: {query}\n"
-              "Travel Plan:")
-PLANNER_INSTRUCTION_PTP = _PLANNER_INSTRUCTION_TP.replace(_TP_TAIL, _PTP_TAIL)
-assert _PTP_TAIL in PLANNER_INSTRUCTION_PTP, "prompt-tail surgery failed"
+User profile: {profile}
+
+Query: {query}
+
+Return your response as a JSON object with a single key `travel_plan` whose value is the plan formatted EXACTLY as shown in the example above (the same "Day N:" / "Current City:" / "Transportation:" / "Breakfast:" / "Attraction:" / "Lunch:" / "Dinner:" / "Accommodation:" line-based layout). Use `\n` as newlines inside the string; do NOT wrap the string in markdown code fences; do NOT add any other top-level keys."""
 
 
 # --------------------------------------------------------------------------- #
@@ -237,21 +280,29 @@ def render_reference_information(ref) -> str:
 
 
 def build_plan_prompt(record) -> str:
-    """Fill our extended PLANNER_INSTRUCTION with the record's persona,
+    """Fill our extended PLANNER_INSTRUCTION with the record's profile,
     query, and rendered reference_information.  `record` can be either
     a dict OR a HF-dataset row (both indexable by key)."""
-    persona = record["persona"] or ""
+    profile = record["profile"] or ""
     query   = record["query"]   or ""
     text    = render_reference_information(record["reference_information"])
-    return PLANNER_INSTRUCTION_PTP.format(text=text, persona=persona, query=query)
+    return PLANNER_INSTRUCTION_PTP.format(text=text, profile=profile, query=query)
 
 
 # --------------------------------------------------------------------------- #
 # Backends                                                                    #
 # --------------------------------------------------------------------------- #
 class Backend:
+    """Abstract base. ``generate_batch`` returns one text per prompt.
+
+    ``on_result`` is an optional per-completion callback: as soon as a
+    single prompt finishes, backends invoke it with ``(index, text)``
+    so the caller can persist the result to disk immediately, which
+    makes Ctrl-C interruptions non-destructive.
+    """
     name: str = "abstract"
-    def generate_batch(self, prompts: list[str], *, max_tokens: int) -> list[str]:
+    def generate_batch(self, prompts: list[str], *, max_tokens: int,
+                       on_result=None) -> list[str]:
         raise NotImplementedError
 
 
@@ -259,30 +310,89 @@ class AnthropicBackend(Backend):
     name = "anthropic"
     def __init__(self, model: str, workers: int = 8):
         import anthropic
-        self.client = anthropic.Anthropic()
+        # Disable SDK's silent internal retries so ``_one`` handles 429s
+        # visibly; per-request timeout cap keeps stuck sockets from
+        # freezing a worker.
+        self.client = anthropic.Anthropic(max_retries=0, timeout=120.0)
         self.model = model
         self.workers = workers
 
     def _one(self, prompt: str, max_tokens: int) -> str:
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            temperature=TEMPERATURE,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return "".join(b.text for b in msg.content
-                       if getattr(b, "type", None) == "text").strip()
+        """Single Anthropic call with EXPLICIT rate-limit handling.
 
-    def generate_batch(self, prompts, *, max_tokens):
+        The default Anthropic SDK retries 429s internally with silent
+        exponential backoff -- which looks like the process 'stalled'
+        for tens of seconds with no output.  We surface the wait
+        directly by catching RateLimitError, parsing the ``retry-after``
+        header when available, logging to stderr so the user knows why
+        the progress bar isn't moving, and retrying.
+        """
+        import re as _re, time as _time, sys as _sys, random as _random
+        from anthropic import RateLimitError, APITimeoutError, APIConnectionError
+
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            try:
+                msg = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=TEMPERATURE,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return "".join(b.text for b in msg.content
+                               if getattr(b, "type", None) == "text").strip()
+            except RateLimitError as e:
+                retry_after = None
+                resp = getattr(e, "response", None)
+                if resp is not None and hasattr(resp, "headers"):
+                    try:
+                        retry_after = float(resp.headers.get("retry-after") or 0)
+                    except (TypeError, ValueError):
+                        retry_after = None
+                wait = retry_after if retry_after else min(60.0, 2 ** attempt)
+                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
+                print(f"\n[rate-limit] anthropic 429   sleeping {wait:.2f}s "
+                      f"(attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+            except (APITimeoutError, APIConnectionError) as e:
+                wait = min(30.0, 2 ** attempt)
+                print(f"\n[api-transient] {type(e).__name__}: "
+                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+        print(f"\n[error] Anthropic call failed after {max_attempts} attempts; skipping.",
+              file=_sys.stderr, flush=True)
+        return ""
+
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         results = [None] * len(prompts)
         reporter = _ProgressReporter(len(prompts),
                                      label=f"anthropic ({self.workers}w)")
+        import sys as _sys
+        _first_error_logged = False
         try:
             with ThreadPoolExecutor(max_workers=self.workers) as ex:
                 futs = {ex.submit(self._one, p, max_tokens): i
                         for i, p in enumerate(prompts)}
                 for f in as_completed(futs):
-                    results[futs[f]] = f.result()
+                    idx = futs[f]
+                    try:
+                        text = f.result()
+                    except Exception as e:
+                        if not _first_error_logged:
+                            print(f"\n[error] worker {idx} raised {type(e).__name__}: {e}",
+                                  file=_sys.stderr, flush=True)
+                            _first_error_logged = True
+                        text = ""
+                    results[idx] = text
+                    if on_result is not None and text:
+                        try:
+                            on_result(idx, text)
+                        except Exception:
+                            pass
                     reporter.step()
         finally:
             reporter.close()
@@ -297,29 +407,129 @@ class OpenAIBackend(Backend):
         kwargs: dict = {}
         if base_url is not None: kwargs["base_url"] = base_url
         if api_key  is not None: kwargs["api_key"]  = api_key
+        # Disable the SDK's silent internal retry so ``_one`` handles
+        # 429s visibly.  Cap per-request timeout so stuck connections
+        # can't freeze a worker forever.
+        kwargs["max_retries"] = 0
+        kwargs["timeout"] = 120.0
         self.client = OpenAI(**kwargs)
         self.model = model
         self.workers = workers
 
     def _one(self, prompt: str, max_tokens: int) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=TEMPERATURE,
-            max_completion_tokens=max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
+        """Single OpenAI call with EXPLICIT rate-limit handling.
 
-    def generate_batch(self, prompts, *, max_tokens):
+        See AnthropicBackend._one for the rationale -- OpenAI's SDK
+        also retries 429s silently under the hood, which mimics a
+        hang from the caller's point of view.  We surface it.
+        """
+        import re as _re, time as _time, sys as _sys, random as _random
+        from openai import RateLimitError, APITimeoutError, APIConnectionError
+
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            try:
+                # GPT-5-family reasoning models: `temperature` MUST be
+                # the default (1); passing anything else raises
+                # unsupported_value.  Omit it entirely so the SDK uses
+                # the default.  Reasoning knobs + json_object response
+                # format are supported.  See PLANNER_INSTRUCTION_PTP
+                # which instructs the model to return a JSON object.
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=max_tokens,
+                    reasoning_effort="none", #"medium",
+                    verbosity="medium",
+                    # response_format={"type": "json_object"},
+                )
+                choice = resp.choices[0]
+                content = (choice.message.content or "").strip()
+                # Empty content on GPT-5-family means the reasoning
+                # tokens ate the budget (finish_reason = "length") or
+                # the API refused (finish_reason = "content_filter" /
+                # other).  Log the diagnostic ONCE per retry so
+                # silent-empty-writes don't look like a hang.
+                if not content:
+                    fr = getattr(choice, "finish_reason", None)
+                    usage = getattr(resp, "usage", None)
+                    reasoning_tok = None
+                    if usage is not None:
+                        details = getattr(usage, "completion_tokens_details", None)
+                        if details is not None:
+                            reasoning_tok = getattr(details, "reasoning_tokens", None)
+                    print(f"\n[empty] finish_reason={fr!r}  "
+                          f"completion_tokens={getattr(usage,'completion_tokens',None)}  "
+                          f"reasoning_tokens={reasoning_tok}  "
+                          f"max_completion_tokens={max_tokens}"
+                          f"   -> raise max_completion_tokens or drop reasoning_effort to 'low'",
+                          file=_sys.stderr, flush=True)
+                return content
+            except RateLimitError as e:
+                msg = str(getattr(e, "message", e))
+                m = _re.search(r"try again in\s+([\d.]+)\s*(ms|s|m)", msg)
+                if m:
+                    v = float(m.group(1)); unit = m.group(2)
+                    wait = v/1000.0 if unit == "ms" else (v*60.0 if unit == "m" else v)
+                else:
+                    wait = min(60.0, 2 ** attempt)
+                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
+                # Trim the (typically-long) SDK message down to essentials.
+                lim = _re.search(r"Limit\s+(\d+)", msg)
+                usd = _re.search(r"Used\s+(\d+)", msg)
+                req = _re.search(r"Requested\s+(\d+)", msg)
+                brief = (f"limit={lim.group(1) if lim else '?'} "
+                         f"used={usd.group(1) if usd else '?'} "
+                         f"req={req.group(1) if req else '?'}"
+                         if (lim or usd or req) else msg[:80])
+                print(f"\n[rate-limit] {brief}   sleeping {wait:.2f}s "
+                      f"(attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+            except (APITimeoutError, APIConnectionError) as e:
+                wait = min(30.0, 2 ** attempt)
+                print(f"\n[api-transient] {type(e).__name__}: "
+                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
+                      file=_sys.stderr, flush=True)
+                _time.sleep(wait)
+                continue
+        print(f"\n[error] OpenAI call failed after {max_attempts} attempts; skipping.",
+              file=_sys.stderr, flush=True)
+        return ""
+
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         results = [None] * len(prompts)
         reporter = _ProgressReporter(len(prompts),
                                      label=f"openai ({self.workers}w)")
+        import sys as _sys
+        _first_error_logged = False
         try:
             with ThreadPoolExecutor(max_workers=self.workers) as ex:
                 futs = {ex.submit(self._one, p, max_tokens): i
                         for i, p in enumerate(prompts)}
                 for f in as_completed(futs):
-                    results[futs[f]] = f.result()
+                    idx = futs[f]
+                    try:
+                        text = f.result()
+                    except Exception as e:
+                        # Surface the FIRST unexpected exception so silent
+                        # cache-writes-not-happening doesn't look like a hang.
+                        # (RateLimit / Timeout / ConnectionError are handled
+                        # inside _one with visible logs; anything reaching
+                        # here is an unexpected error worth calling out --
+                        # e.g., BadRequestError on unsupported params.)
+                        if not _first_error_logged:
+                            print(f"\n[error] worker {idx} raised {type(e).__name__}: {e}",
+                                  file=_sys.stderr, flush=True)
+                            _first_error_logged = True
+                        text = ""
+                    results[idx] = text
+                    if on_result is not None and text:
+                        try:
+                            on_result(idx, text)
+                        except Exception:
+                            pass
                     reporter.step()
         finally:
             reporter.close()
@@ -348,12 +558,24 @@ class VLLMOfflineBackend(Backend):
             **extra,
         )
 
-    def generate_batch(self, prompts, *, max_tokens):
+    def generate_batch(self, prompts, *, max_tokens, on_result=None):
         from vllm import SamplingParams
         sp = SamplingParams(temperature=TEMPERATURE, max_tokens=max_tokens)
         conversations = [[{"role": "user", "content": p}] for p in prompts]
         outputs = self.llm.chat(conversations, sampling_params=sp, use_tqdm=True)
-        return [o.outputs[0].text.strip() for o in outputs]
+        texts = [o.outputs[0].text.strip() for o in outputs]
+        # vLLM's internal batching is opaque; the best we can do here
+        # is fire on_result after the whole batch completes so every
+        # completed plan lands in the cache before the run's end (and
+        # merge / write_output_jsonl) is invoked.
+        if on_result is not None:
+            for i, t in enumerate(texts):
+                if t:
+                    try:
+                        on_result(i, t)
+                    except Exception:
+                        pass
+        return texts
 
 
 def make_backend(name: str, model: str, *,
@@ -422,9 +644,18 @@ def _load_cache(cache_path: Path) -> dict[int, str]:
 
 
 def _append_cache(cache_path: Path, idx: int, text: str) -> None:
+    # Append + flush + fsync so a Ctrl-C or a killed request leaves every
+    # already-completed plan safely on disk instead of stuck in Python's
+    # default buffer.
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("a") as f:
         f.write(json.dumps({"idx": idx, "text": text}) + "\n")
+        f.flush()
+        try:
+            import os as _os
+            _os.fsync(f.fileno())
+        except OSError:
+            pass
 
 
 def _parse_index_list(spec: str) -> set[int]:
@@ -479,33 +710,59 @@ def generate_all(rows: list[tuple[int, dict]], backend: Backend, *,
         return
 
     prompts = [p for (_, p) in pending]
+
+    # Serialize cache writes across worker threads so appends can't
+    # interleave partial JSON lines on disk.
+    import threading
+    _cache_lock = threading.Lock()
+
+    def _persist(local_index: int, text: str) -> None:
+        """Called from the backend as soon as prompt ``local_index``
+        finishes.  Look up the pending row's real row-index and append
+        immediately -- so any Ctrl-C partway through leaves every
+        completed plan on disk instead of only after the batch ends.
+        """
+        row_idx, _ = pending[local_index]
+        with _cache_lock:
+            _append_cache(cache_path, row_idx, text)
+
     t0 = time.time()
     if verbose:
         print(f"[run] dispatching {len(prompts)} prompts (max_tokens={max_tokens})...")
-    texts = backend.generate_batch(prompts, max_tokens=max_tokens)
+    try:
+        texts = backend.generate_batch(prompts, max_tokens=max_tokens,
+                                       on_result=_persist)
+    except KeyboardInterrupt:
+        import sys as _sys
+        print(f"\n[run] interrupted; cache holds every plan completed so far",
+              file=_sys.stderr, flush=True)
+        raise
     dt = time.time() - t0
     if verbose:
         print(f"[run] generated {len(texts)} plans in {dt:.1f}s "
               f"({len(texts)/max(dt, 1e-6):.2f} plans/sec)")
 
-    for (idx, _), text in zip(pending, texts):
-        if text:
-            _append_cache(cache_path, idx, text)
-
 
 def write_output_jsonl(rows: list[tuple[int, dict]], out_path: Path, *,
                        cache_path: Path) -> None:
-    """Emit a JSONL with `{idx, persona, query, reference_information,
-    llm_travel_plan}` for every row whose plan is now in the cache."""
+    """Emit a JSONL with `{idx, profile, query, reference_information,
+    llm_travel_plan}` for every row whose plan is now in the cache.
+
+    Under json_object response mode (default for the OpenAI backend), the
+    cached text is a JSON envelope like ``{"travel_plan": "..."}``; here
+    we extract the inner string so ``llm_travel_plan`` stays the same
+    line-based text the downstream TravelPlanner evaluator expects.
+    Non-JSON cached plans (e.g. Anthropic / vLLM backends that don't
+    use response_format) pass through unchanged."""
     cache = _load_cache(cache_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out_path.open("w") as f:
         for idx, r in rows:
-            plan = cache.get(idx)
+            plan = _extract_plan_text(cache.get(idx))
             rec = {
                 "idx":                   idx,
-                "persona":               r["persona"],
+                "profile":               r["profile"],
                 "query":                 r["query"],
                 "reference_information": r["reference_information"],
                 "llm_travel_plan":       plan,
@@ -514,6 +771,27 @@ def write_output_jsonl(rows: list[tuple[int, dict]], out_path: Path, *,
             if plan:
                 n += 1
     print(f"[out] wrote {n} records with plans (of {len(rows)} total) → {out_path}")
+
+
+def _extract_plan_text(raw: str | None) -> str | None:
+    """Strip a ``{"travel_plan": "..."}`` JSON envelope if present.
+    Returns the original string when the raw text isn't a JSON object
+    with a ``travel_plan`` key (Anthropic / vLLM backends emit plain
+    text; older cached entries pre-json_object also emit plain text).
+    """
+    if not raw:
+        return raw
+    stripped = raw.strip()
+    if not stripped.startswith("{"):
+        return raw
+    try:
+        obj = json.loads(stripped)
+    except json.JSONDecodeError:
+        return raw
+    if isinstance(obj, dict) and "travel_plan" in obj:
+        v = obj["travel_plan"]
+        return v if isinstance(v, str) else raw
+    return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -530,6 +808,12 @@ def main():
                     help="Model name.  Defaults: anthropic→claude-haiku-4-5-20251001, "
                          "openai→gpt-5.4-mini, vllm-offline→meta-llama/Llama-3.1-8B-Instruct")
     ap.add_argument("--workers", type=int, default=4)
+    # `max_completion_tokens` for reasoning models includes hidden
+    # chain-of-thought tokens.  A 3-7 day plan needs ~500-1500 output
+    # tokens; `reasoning_effort='medium'` can add 2000-6000 reasoning
+    # tokens.  Default 16384 leaves comfortable headroom.  Drop this
+    # (e.g. 8192) if you switch to `reasoning_effort='low'` / 'minimal'
+    # in the backend for cost / speed.
     ap.add_argument("--max-tokens", type=int, default=4096)
 
     # HF dataset selection.
@@ -595,7 +879,7 @@ def main():
     print(f"[in]  {n_total} rows loaded from HF: {args.dataset}:{args.split}")
     print(f"[in]  columns: {ds.column_names}")
 
-    required = {"persona", "query", "reference_information"}
+    required = {"profile", "query", "reference_information"}
     missing = required - set(ds.column_names)
     if missing:
         sys.exit(f"dataset is missing required columns: {sorted(missing)}")
