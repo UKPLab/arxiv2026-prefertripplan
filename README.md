@@ -1,11 +1,12 @@
-<!-- <p align="center">
+<p align="center">
   <img src='logo.png' width='200'>
-</p> -->
+</p>
 
 # PreferTripPlan
-<!-- [![Arxiv](https://img.shields.io/badge/Arxiv-YYMM.NNNNN-red?style=flat-square&logo=arxiv&logoColor=white)](https://put-here-your-paper.com)
+[![Arxiv](https://img.shields.io/badge/Arxiv-YYMM.NNNNN-red?style=flat-square&logo=arxiv&logoColor=white)](https://put-here-your-paper.com)
+[![HuggingFace Dataset](https://img.shields.io/badge/%F0%9F%A4%97%20HuggingFace-Dataset-yellow?style=flat-square)](https://huggingface.co/datasets/UKPLab/PreferTripPlan)
 [![License](https://img.shields.io/github/license/UKPLab/arxiv2026-prefertripplan)](https://opensource.org/licenses/Apache-2.0)
-[![Python Versions](https://img.shields.io/badge/Python-3.10-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/) -->
+[![Python Versions](https://img.shields.io/badge/Python-3.10-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 
 **PreferTripPlan** is a benchmark for evaluating language-model travel planners under structured, multi-paradigm user preferences and persona-driven drift. It extends the [TravelPlanner](https://osu-nlp-group.github.io/TravelPlanner/) test split with 1000 preference-augmented queries covering **8 preference paradigms** (Atomic, Composite, Numeric, Conditional, Lexicographic, Compensatory, Temporal, Scoped) and a controlled **persona drift** protocol (aligned / omission / inversion) that decouples the traveler's stated persona from their in-query preferences.
 
@@ -22,6 +23,7 @@ Don't hesitate to send us an e-mail or report an issue if something is broken or
 
 | Property | Value |
 |---|---|
+| HF splits | `test` (225 curated balanced rows) · `test_large` (1000 full rows) |
 | Records | 1000 (984 augmented + 16 non-augmentable pass-through) |
 | Difficulty split | easy 348 · medium 333 · hard 319 |
 | Persona drift per level | aligned 30% · omission 35% · inversion 35% |
@@ -38,13 +40,13 @@ Clone the repo and set up a Python 3.10 virtual environment:
 
 ```bash
 git clone https://github.com/UKPLab/arxiv2026-prefertripplan.git
-cd data-generation
+cd arxiv2026-prefertripplan
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The TravelPlanner CSV / JSONL sources live under `database/` (accommodations, restaurants, attractions, flights, distance matrix, city↔state mapping). The base test queries are `database/travelplanner-test.jsonl` and are used verbatim — the augmenter only ADDS fields, never mutates the original query facts.
+The TravelPlanner CSV / JSONL sources live under `database/` (accommodations, restaurants, attractions, flights, distance matrix, city↔state mapping). The base test queries are `database/travelplanner_test.jsonl` and are used verbatim — the augmenter only ADDS fields, never mutates the original query facts.
 
 
 ## Usage
@@ -58,7 +60,7 @@ Attaches one (easy) or two (medium/hard) resolved preferences to every query, dr
 ```bash
 python3 augment_preferences.py \
     --bank preference_bank.json \
-    --queries database/travelplanner-test.jsonl \
+    --queries database/travelplanner_test.jsonl \
     --db database \
     --out prefertripplan.jsonl \
     --seed 20260601
@@ -93,6 +95,52 @@ python3 render_llm_nl.py --sample-qids data-augmentation/representative_qids.txt
 ```
 
 Progress + ETA are shown live via tqdm (falls back to a plain `\r`-updated line if tqdm isn't installed).
+
+
+### Stage 4 — HuggingFace export: `test` + `test_large` splits
+
+Once Stage 3 has written `llm_nl_query` / `llm_nl_profile` into the source jsonl, the two HF-ready splits are produced from it:
+
+- **`test_large`** — the full **1000-record** set, one row per source record. Serves as the wide-coverage split for statistical power and per-slice analysis.
+- **`test`** — a curated, balanced **225-record** subset drawn from `test_large`. Balanced across level (75 easy / 75 medium / 75 hard), pairing (single / independent / overlapping × competing / non_competing), profile-drift mode (~30/35/35 aligned/omission/inversion), all 8 paradigms (≈9–10 each in easy/single), and all 9 Temporal sub-ops. This is the recommended default for headline scoring.
+
+Both splits share the same schema; every row carries an `id` field (contiguous 1..N, unique within the split) as its first key. Rows in `test` additionally carry `source_id` — the `id` of the same record in `test_large` — so the two splits can be joined without an external map.
+
+Both files land under `data-generation/HF-data/` alongside a README with YAML frontmatter that HuggingFace's Hub loader parses to expose the two splits under one `default` config:
+
+```
+data-generation/HF-data/
+├─ prefertripplan_test.jsonl          # 225 rows, split="test"
+├─ prefertripplan_test_large.jsonl    # 1000 rows, split="test_large"
+└─ README.md
+```
+
+Two-step pipeline (run in order):
+
+```bash
+# 1. Select the balanced 225-record subset by query_id.
+#    Writes: data-generation/prefertripplan.subset.ids.txt
+#            (+ prefertripplan.subset.jsonl and .summary.txt for auditing)
+python3 data-generation/build_balanced_subset.py --target 225
+
+# 2. Emit the two HF splits from the LLM-rendered source.
+#    Reads:  data-generation/prefertripplan.<model-slug>.jsonl,
+#            data-generation/prefertripplan.subset.ids.txt
+#    Writes: data-generation/HF-data/prefertripplan_test.jsonl,
+#            data-generation/HF-data/prefertripplan_test_large.jsonl
+python3 data-generation/build_hf_dataset.py \
+    --in data-generation/prefertripplan.<model-slug>.jsonl
+```
+
+The emitted splits are published on the HuggingFace Hub at [UKPLab/PreferTripPlan](https://huggingface.co/datasets/UKPLab/PreferTripPlan).
+
+Downstream consumption:
+
+```python
+from datasets import load_dataset
+ds_test       = load_dataset("UKPLab/PreferTripPlan", split="test")        # 225
+ds_test_large = load_dataset("UKPLab/PreferTripPlan", split="test_large")  # 1000
+```
 
 
 ### Expected results
@@ -133,7 +181,7 @@ python3 analyze_distributions.py
 
 **`augment_preferences.py`**
 - `--bank`: preference-bank JSON path (default: `preference_bank.json`)
-- `--queries`: base TravelPlanner test JSONL (default: `database/travelplanner-test.jsonl`)
+- `--queries`: base TravelPlanner test JSONL (default: `database/travelplanner_test.jsonl`)
 - `--db`: database directory holding accommodations/restaurants/attractions/flights CSVs
 - `--out`: output JSONL (default: `prefertripplan.jsonl`)
 - `--seed`: RNG seed (default: 20260601)
@@ -158,6 +206,10 @@ Preference-Augmentation/
 ├─ preferences.py             8-paradigm preference type hierarchy + evaluators
 ├─ persona_traits.py          Curated trait tables (aligned + inversion variants per field)
 ├─ preference_bank.json       Human-curated bank of preference templates with example values
+├─ data-generation/
+│   ├─ build_balanced_subset.py    Stage-4a: pick a balanced 225-record subset by query_id
+│   ├─ build_hf_dataset.py         Stage-4b: emit prefertripplan_test{,_large}.jsonl
+│   └─ HF-data/                    Emitted HF-ready splits + README (uploaded to the Hub)
 ├─ database/                  TravelPlanner sources (CSVs + base test queries)
 ├─ analysis/                  Distribution reports and plots
 └─ data-augmentation/         Auxiliary scripts (flight DB build, query redate, curated qid list)
@@ -182,7 +234,7 @@ Every stage reads what the previous stage wrote and mutates `prefertripplan.json
 
 ```bash
 # Stage 1 — Preference augmentation
-#   Reads:  preference_bank.json, database/travelplanner-test.jsonl, database/*
+#   Reads:  preference_bank.json, database/travelplanner_test.jsonl, database/*
 #   Writes: prefertripplan.jsonl (preferences, preference_traces, pairing_type,
 #           pairing_subtype, budget_multiplier, feasibility_metadata,
 #           solution_information, reference_information)
@@ -199,6 +251,20 @@ python3 generate_personas.py
 #   Writes: prefertripplan.jsonl (llm_nl_persona, llm_nl_query),
 #           llm_nl_cache.jsonl (append-only)
 python3 render_llm_nl.py --backend anthropic
+
+# Stage 4a — Pick balanced 225-record subset by query_id
+#   Reads:  data-generation/prefertripplan.jsonl
+#   Writes: data-generation/prefertripplan.subset.ids.txt
+#           data-generation/prefertripplan.subset.jsonl (+ .summary.txt)
+python3 data-generation/build_balanced_subset.py --target 225
+
+# Stage 4b — Emit the two HF splits from the LLM-rendered source
+#   Reads:  data-generation/prefertripplan.<model-slug>.jsonl,
+#           data-generation/prefertripplan.subset.ids.txt
+#   Writes: data-generation/HF-data/prefertripplan_test.jsonl        (225 rows,  split="test")
+#           data-generation/HF-data/prefertripplan_test_large.jsonl  (1000 rows, split="test_large")
+python3 data-generation/build_hf_dataset.py \
+    --in data-generation/prefertripplan.<model-slug>.jsonl
 
 # Optional — Distribution / balance audit
 #   Reads:  prefertripplan.jsonl

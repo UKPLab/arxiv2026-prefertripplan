@@ -6020,7 +6020,7 @@ def main() -> None:
     ap.add_argument("--bank", type=Path,
                     default=project / "preference_bank.json")
     ap.add_argument("--queries", type=Path,
-                    default=parent / "travelplanner-test.jsonl")
+                    default=parent / "travelplanner_test.jsonl")
     ap.add_argument("--db", type=Path,
                     default=parent / "database")
     ap.add_argument("--out", type=Path,

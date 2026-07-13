@@ -1,15 +1,32 @@
-"""Export a HuggingFace-ready slice of ``data-generation/prefertripplan.jsonl``.
+"""Export the HuggingFace-ready slices of ``data-generation/prefertripplan.jsonl``.
 
 Maintainer-side utility.  NOT uploaded to the HF Hub; the Hub serves
-the emitted JSONL + a README.md under a chosen HF-data folder.
+the emitted JSONL files + a README.md under a chosen HF-data folder.
 
 Reads the augmented + profile-rendered + LLM-rendered file inside this
-data-generation directory and writes ``prefertripplan.jsonl`` with a
-richer per-record schema than the original (which only carried
-persona / query / reference_information).
+data-generation directory and writes two files into ``HF-data/``:
+
+  * ``prefertripplan_test_large.jsonl`` -- the full ``test_large`` split
+    (one row per source record with an LLM-rendered query + a resolvable
+    reference-information pool -- ~1000 rows).  Each row carries an
+    ``id`` field (contiguous, starting at 1) as its first key.
+
+  * ``prefertripplan_test.jsonl``        -- the curated ``test`` split
+    (~225 rows), a balanced subset of ``test_large`` selected by
+    ``data-generation/build_balanced_subset.py``.  Each row carries an
+    ``id`` (contiguous, 1..N-of-subset) as its first key, immediately
+    followed by ``source_id`` (the ``id`` of the same row in
+    ``test_large``).
+
+Which source records land in the ``test`` split is driven by
+``--subset-ids`` (default ``data-generation/prefertripplan.subset.ids.txt``):
+a plain-text file with one source ``query_id`` per line.
 
 Emitted fields (per record):
 
+  id                      -- contiguous integer, first key
+  source_id               -- (test split only) id of the matching row
+                             in test_large; second key immediately after id
   org                     -- origin city (from record)
   dest                    -- destination state or city (from record)
   days                    -- trip duration (int, from record)
@@ -72,7 +89,11 @@ runs safe to export).
 
 Usage:
     python3 data-generation/build_hf_dataset.py
-    python3 data-generation/build_hf_dataset.py --in <path>.jsonl --out <out>.jsonl
+    python3 data-generation/build_hf_dataset.py \\
+        --in                data-generation/prefertripplan.jsonl \\
+        --subset-ids        data-generation/prefertripplan.subset.ids.txt \\
+        --out-test_large    data-generation/HF-data/prefertripplan_test_large.jsonl \\
+        --out-test          data-generation/HF-data/prefertripplan_test.jsonl
 """
 from __future__ import annotations
 
@@ -83,8 +104,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 
-DEFAULT_SRC = ROOT / "prefertripplan.jsonl"
-DEFAULT_OUT = ROOT / "HF-data" / "prefertripplan.jsonl"
+DEFAULT_SRC             = ROOT / "prefertripplan.jsonl"
+DEFAULT_SUBSET_IDS      = ROOT / "prefertripplan.subset.ids.txt"
+DEFAULT_OUT_TEST_LARGE  = ROOT / "HF-data" / "prefertripplan_test_large.jsonl"
+DEFAULT_OUT_TEST        = ROOT / "HF-data" / "prefertripplan_test.jsonl"
 
 
 PROFILE_JSON_INTERESTS_KEYS = (
@@ -232,19 +255,53 @@ def build_record(r: dict[str, Any]) -> dict[str, Any] | None:
     return row
 
 
+def _load_subset_ids(path: Path) -> set[int]:
+    """Read one integer per non-empty line from ``path`` and return them
+    as a set.  Comments (lines starting with ``#``) are ignored."""
+    ids: set[int] = set()
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            ids.add(int(line))
+    return ids
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--in",  dest="in_path",  type=Path, default=DEFAULT_SRC,
                     help="Source JSONL to export from.")
-    ap.add_argument("--out", dest="out_path", type=Path, default=DEFAULT_OUT,
-                    help="Output JSONL path (parent dir is created).")
+    ap.add_argument("--subset-ids", dest="subset_ids_path", type=Path,
+                    default=DEFAULT_SUBSET_IDS,
+                    help="Path to a text file listing source query_ids "
+                         "(one per line) that belong to the curated "
+                         "``test`` split.  Records not listed here go "
+                         "only into ``test_large``.")
+    ap.add_argument("--out-test_large", dest="out_large_path", type=Path,
+                    default=DEFAULT_OUT_TEST_LARGE,
+                    help="Output JSONL path for the full test_large split.")
+    ap.add_argument("--out-test", dest="out_test_path", type=Path,
+                    default=DEFAULT_OUT_TEST,
+                    help="Output JSONL path for the curated test split.")
     args = ap.parse_args()
 
-    args.out_path.parent.mkdir(parents=True, exist_ok=True)
+    subset_ids = _load_subset_ids(args.subset_ids_path)
+    print(f"[subset] {len(subset_ids)} source query_ids from "
+          f"{args.subset_ids_path}")
 
-    n_in = n_out = n_skipped = 0
-    with args.in_path.open() as fin, args.out_path.open("w") as fout:
+    args.out_large_path.parent.mkdir(parents=True, exist_ok=True)
+    args.out_test_path .parent.mkdir(parents=True, exist_ok=True)
+
+    n_in = n_skipped = 0
+    id_large = 0
+    id_test  = 0
+    unmatched_subset_ids = set(subset_ids)
+
+    with args.in_path.open() as fin, \
+         args.out_large_path.open("w") as f_large, \
+         args.out_test_path .open("w") as f_test:
         for line in fin:
             line = line.strip()
             if not line:
@@ -255,10 +312,29 @@ def main() -> None:
             if row is None:
                 n_skipped += 1
                 continue
-            fout.write(json.dumps(row, ensure_ascii=False) + "\n")
-            n_out += 1
+            # test_large: id (contiguous) is the first key.
+            id_large += 1
+            large_row = {"id": id_large, **row}
+            f_large.write(json.dumps(large_row, ensure_ascii=False) + "\n")
 
-    print(f"read {n_in}, wrote {n_out}, skipped {n_skipped} -> {args.out_path}")
+            # test split: same underlying row, but with a contiguous id
+            # and a source_id pointing back to the test_large id.
+            qid = r.get("query_id")
+            if qid in subset_ids:
+                id_test += 1
+                test_row = {"id": id_test, "source_id": id_large, **row}
+                f_test.write(json.dumps(test_row, ensure_ascii=False) + "\n")
+                unmatched_subset_ids.discard(qid)
+
+    print(f"[test_large] wrote {id_large} rows to {args.out_large_path}")
+    print(f"[test]       wrote {id_test} rows to {args.out_test_path}")
+    print(f"[skip]       {n_skipped} source records skipped "
+          f"(missing llm_nl_query or reference_information)")
+    if unmatched_subset_ids:
+        print(f"[warn]       {len(unmatched_subset_ids)} subset ids not "
+              f"found in the source (missing NL or reference_information):"
+              f" {sorted(unmatched_subset_ids)[:10]}"
+              f"{' ...' if len(unmatched_subset_ids) > 10 else ''}")
 
 
 if __name__ == "__main__":

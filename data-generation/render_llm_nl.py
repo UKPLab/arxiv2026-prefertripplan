@@ -767,11 +767,17 @@ class OpenAIBackend(Backend):
         max_attempts = 8
         for attempt in range(max_attempts):
             try:
+                # GPT-5-family reasoning models: `temperature` MUST be
+                # the default (1); anything else raises unsupported_value.
+                # Omit it entirely so the SDK uses the default.  A
+                # minimal reasoning effort suffices for the prose-
+                # rewriting task and keeps latency + cost down.
                 resp = self.client.chat.completions.create(
-                    model       = self.model,
-                    messages    = [{"role": "user", "content": prompt}],
-                    temperature = TEMPERATURE,
+                    model                  = self.model,
+                    messages               = [{"role": "user", "content": prompt}],
                     max_completion_tokens  = max_tokens,
+                    reasoning_effort       = "minimal",
+                    verbosity              = "medium",
                 )
                 return (resp.choices[0].message.content or "").strip()
             except RateLimitError as e:
