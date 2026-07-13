@@ -1,12 +1,12 @@
-<p align="center">
+<!-- <p align="center">
   <img src='logo.png' width='200'>
-</p>
+</p> -->
 
 # PreferTripPlan
 [![Arxiv](https://img.shields.io/badge/Arxiv-YYMM.NNNNN-red?style=flat-square&logo=arxiv&logoColor=white)](https://put-here-your-paper.com)
 [![HuggingFace Dataset](https://img.shields.io/badge/%F0%9F%A4%97%20HuggingFace-Dataset-yellow?style=flat-square)](https://huggingface.co/datasets/UKPLab/PreferTripPlan)
-[![License](https://img.shields.io/github/license/UKPLab/arxiv2026-prefertripplan)](https://opensource.org/licenses/Apache-2.0)
-[![Python Versions](https://img.shields.io/badge/Python-3.10-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+<!-- [![License](https://img.shields.io/github/license/UKPLab/arxiv2026-prefertripplan)](https://opensource.org/licenses/Apache-2.0)
+[![Python Versions](https://img.shields.io/badge/Python-3.10-blue.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/) -->
 
 **PreferTripPlan** is a benchmark for evaluating language-model travel planners under structured, multi-paradigm user preferences and persona-driven drift. It extends the [TravelPlanner](https://osu-nlp-group.github.io/TravelPlanner/) test split with 1000 preference-augmented queries covering **8 preference paradigms** (Atomic, Composite, Numeric, Conditional, Lexicographic, Compensatory, Temporal, Scoped) and a controlled **persona drift** protocol (aligned / omission / inversion) that decouples the traveler's stated persona from their in-query preferences.
 
