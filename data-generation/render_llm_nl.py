@@ -1,8 +1,19 @@
 """LLM-based natural-language renderers for profile + query.
 
-Adds two new fields per augmented record:
-    llm_nl_profile  — fluent first-person profile introduction
-    llm_nl_query    — fluent trip-request message, drift-aware framing
+Adds four new fields per augmented record:
+    llm_nl_profile                    — fluent first-person profile intro
+    llm_nl_query_without_preferences  — opener + trip facts + hard constraints,
+                                        preference-free (baseline reading)
+    llm_nl_only_preferences           — preferences-only paragraph, opens with
+                                        a soft connector so it flows out of the
+                                        constraints paragraph
+    llm_nl_query                      — the two above concatenated with a
+                                        single space (combined reading)
+
+The query prompt asks the LLM for a JSON object with the two keys
+`query_without_preferences` and `only_preferences`; a post-processor
+splits them into the three fields above so downstream can compare
+plan-generation performance WITH vs WITHOUT preferences.
 
 Supports three backends (pick via ``--backend`` or env ``LLM_NL_BACKEND``):
     anthropic   — Anthropic API (default).  Needs ANTHROPIC_API_KEY.
@@ -153,55 +164,63 @@ TEMPERATURE = 0.7
 # Prompts (shared across backends)
 # --------------------------------------------------------------------------- #
 
-PROFILE_PROMPT = """You are rewriting a structured profile into a fluent, natural, first-person introduction. The profile describes a SINGLE traveler.
+PROFILE_PROMPT = """You are rewriting a structured profile into a fluent, natural third-person description of a traveler.  This is a user-summary paragraph -- refer to the traveler as "the user" (or use appropriate third-person subject when a pronoun would read awkwardly).  The paragraph is NOT written in the traveler's own voice.
+
+STRICT PRONOUN RULE (must not be violated anywhere in the output):
+- DO NOT use ANY first-person pronoun: "I", "me", "my", "mine", "myself", "we", "us", "our", "ours", "ourselves", "I'm", "I've", "I'd", "I'll", "we're", "we've", "we'd", "we'll".
+- DO NOT use direct second-person "you" either -- this is a description of the user, not a message to them.
+- USE "the user" as the primary subject.  Third-person pronouns ("they", "them", "their") are acceptable secondary forms when the paragraph would otherwise repeat "the user" too often, but do not lean on them exclusively -- keep "the user" as a recurring anchor at least in the first sentence of each new topic.
 
 FAITHFULNESS:
-- Use ONLY the content listed below. Do NOT invent demographics, occupations, family structure, or any preference not listed.
+- Use ONLY the content listed below.  Do NOT invent demographics, occupations, family structure, or any preference not listed.
 - Do not add hobbies, foods, opinions, or dislikes that aren't in the input.
 - Do not name companions.
 
 STYLE:
-- One flowing paragraph (roughly 4–8 sentences). No bullet lists, no headers, no field labels.
-- The opening must INTEGRATE the location into a full, natural-sounding sentence that introduces the person. The location should be part of a real clause, not a period-terminated fragment standing alone.
+- One flowing paragraph (roughly 4–8 sentences).  No bullet lists, no headers, no field labels.
+- The opening must INTEGRATE the location into a full, natural-sounding sentence that introduces the user.  The location should be part of a real clause, not a period-terminated fragment standing alone.
 
-  Rule for opener content: the location is the ONLY new information the opener may introduce that isn't in the Interests fields. Anything ELSE the opener says about the person — hobbies, lifestyle stance, travel style, food, dislikes, occupational identity, duration of residence, effect of home city on their travel style — MUST come from a real item in the Interests input. Do NOT invent filler traits to pad the opener into a "richer-sounding" first sentence. The reader is introduced to the person by the input, not by the model's guesses.
+  Rule for opener content: the location is the ONLY new information the opener may introduce that isn't in the Interests fields.  Anything ELSE the opener says about the user — hobbies, lifestyle stance, travel style, food, dislikes, occupational identity, duration of residence, effect of home city on their travel style — MUST come from a real item in the Interests input.  Do NOT invent filler traits to pad the opener into a "richer-sounding" first sentence.
 
     GOOD openers (each uses ONLY the location + an actual Interests item, or the location alone as an anchor):
-      - "I'm based in <Location>, and <a Hobbies / Lifestyle / Travel-Style item from the input, rephrased naturally>..."
-      - "I'm based in <Location>. <continues with an actual Interests item>..."
-      - "Home for me is <Location>, and <actual Interests item>..."
-      - "Coming from <Location>, I'm the kind of traveler who <actual Interests item>..."
-      - "<Location>-based, and <actual Interests item>..."
+      - "The user is based in <Location>, and <a Hobbies / Lifestyle / Travel-Style item from the input, rephrased naturally>..."
+      - "Based in <Location>, the user <actual Interests item>..."
+      - "The user, coming from <Location>, is the kind of traveler who <actual Interests item>..."
+      - "The user is a <Location>-based traveler who <actual Interests item>..."
+
+    BAD openers (first-person leakage — forbidden by the STRICT PRONOUN RULE):
+      - "I'm based in <Location>..."          ← "I'm" is banned
+      - "Home for me is <Location>..."          ← "me" is banned
+      - "Coming from <Location>, I'm the kind of traveler..."   ← "I'm" is banned
 
     BAD openers (telegraphic labels — read as a header, not a natural sentence):
       - "Home's <Location>." / "<Location>'s home."   ← truncated, reads as a stamp
-      - "<Location>. I'm ..."
-      - "Home base is <Location>. I love ..."
       - "Location: <Location>..."
 
     BAD openers (fabricated filler — the opener invents traits that aren't in the input):
-      - "I'm based in Boston, and I've never been able to resist a decent bookshop..."   ← if the input says nothing about bookshops
-      - "Living in Sacramento means I spend most weekends chasing farmers' markets..."   ← same
-      - "Coming from Cleveland, I'm the kind of traveler who books early and researches obsessively..."   ← same
-      - "I've lived in Baltimore for years, and outdoor recreation is core to how I travel..."   ← "for years" is a fabricated duration; the input never states residence length
-      - "Home for me is Boston — an amateur historian who never gets tired of a well-curated museum..."   ← "amateur historian" is a fabricated occupational/hobbyist identity; the input just says they enjoy contemplating artifacts, not that they identify as any kind of historian
-      - "Living in <Location> has shaped how I travel..."   ← implies the location caused their travel style; the input never states a causal link
+      - "The user is based in Boston and can't resist a decent bookshop..."   ← if the input says nothing about bookshops
+      - "The user has lived in Baltimore for years..."   ← "for years" is a fabricated duration; the input never states residence length
+      - "The user, an amateur historian from Boston, never tires of a well-curated museum..."   ← "amateur historian" is a fabricated identity
+      - "Living in <Location> has shaped how the user travels..."   ← implies a causal link the input never states
       - Any adjective, hobby, occupation, duration, or personality trait in the opener that isn't traceable to a specific line of the Interests input.
 
-  The location is the ANCHOR at the start, not the entire first sentence. But everything ELSE in the first sentence must come from the actual input.
+  The location is the ANCHOR at the start, not the entire first sentence.  But everything ELSE in the first sentence must come from the actual input.
 
-- Weave every Interests item that has content into the paragraph. Skip fields marked "(none specified)" silently — do not mention their absence.
-- Vary sentence rhythm; do not open every clause with "I".
+- Weave every Interests item that has content into the paragraph.  Skip fields marked "(none specified)" silently — do not mention their absence.
+- Vary sentence rhythm; do not open every sentence with "The user".  Rotate between "The user…", "They…", "…, the user also…", "Based on…", etc.
 - The variant sentences in the input are already complete claims; combine them into fluent prose without inventing new facts around them (this applies to the WHOLE paragraph, not just the opener).
 
 PETS RULE:
-- The pets_line below is the ONLY signal about pets. If pets_line is exactly "(no signal)" — omit any mention of pets from the paragraph entirely. Do NOT write "no pets", "I don't have pets", "no animals", or any similar disclaimer.
-- If pets_line contains any other text (e.g. describing a pet-owner traveler or a pet-averse traveler), weave that stance into the paragraph naturally. If the pets_line implies pet ownership, invent a plausible pet name+type (e.g. "my beagle Riley", "my cat Luna") — but do this ONLY when the pets_line is present.
+- The pets_line below is the ONLY signal about pets.  If pets_line is exactly "(no signal)" — omit any mention of pets from the paragraph entirely.  Do NOT write "no pets", "the user doesn't have pets", "no animals", or any similar disclaimer.
+- If pets_line contains any other text (e.g. describing a pet-owner traveler or a pet-averse traveler), weave that stance into the paragraph naturally.  If the pets_line implies pet ownership, invent a plausible pet name+type in third person (e.g. "their beagle Riley", "the user's cat Luna") — but do this ONLY when the pets_line is present.
 
 PRICE BASIS (accommodation / restaurant traits):
-- Any Interests item that mentions accommodation cost tiers ("per-person nightly rate", "budget-tier per-person nightly", "premium per-person nightly", "median per-person nightly", etc.) is on a PER-PERSON PER-NIGHT basis. Preserve any explicit "per person per night" / "per-person nightly" wording that already appears in the trait — do NOT paraphrase it away, and do NOT rewrite it as generic "cost" without the basis.
+- Any Interests item that mentions accommodation cost tiers ("per-person nightly rate", "budget-tier per-person nightly", "premium per-person nightly", "median per-person nightly", etc.) is on a PER-PERSON PER-NIGHT basis.  Preserve any explicit "per person per night" / "per-person nightly" wording that already appears in the trait — do NOT paraphrase it away, and do NOT rewrite it as generic "cost" without the basis.
 - Any Interests item that mentions restaurant cost / meal spend is on a PER-PERSON PER-MEAL basis (TravelPlanner Average-Cost convention).
 - Do NOT introduce dollar figures the input doesn't already contain — but when a trait already carries a per-person basis in words, that basis must survive into the fluent paragraph.
+
+FINAL SELF-CHECK BEFORE EMITTING:
+Scan the paragraph you wrote.  If ANY first-person pronoun ("I", "me", "my", "we", "us", "our" or their contractions) appears, rewrite that sentence to remove it — the profile is entirely third-person.
 
 INPUT:
 Location: {location}
@@ -210,7 +229,7 @@ Lifestyle: {lifestyle}
 Travel style: {travel_style}
 Preferred destinations: {pref_dests}
 Food and dining preferences: {food}
-Things I actively avoid: {dislikes}
+Things the user actively avoids: {dislikes}
 Pets line: {pets}
 
 Write the profile paragraph now. Output only the prose — no preamble, no closing."""
@@ -230,7 +249,7 @@ COST BASIS (accommodation / restaurant thresholds — READ BEFORE VERBALIZING):
 - TRIP BUDGET IS NOT PER-PERSON: the `Budget: ~$<N>` figure in the trip facts is the TOTAL budget for the WHOLE trip — spanning every traveler, every day, every category (accommodation, dining, transportation, attractions). NEVER attach "per person", "per night", "per meal", "per day", or any similar qualifier to this figure. Verbalize it plainly: "on a budget of about $<N>", "the trip budget is around $<N>", "we're aiming to stay under $<N> in total". Do NOT split it across travelers ("$<N>/2 = ..."), across nights, or across cost categories. The per-person cost basis rule above applies ONLY to `Accommodation.cost` and `Restaurant.cost` preference thresholds — it does NOT apply to the overall trip budget.
 
 CONCRETE VALUES MUST BE PRESERVED (WITH ONE EXCEPTION):
-- Each preference comes with a structured predicate. Threshold-style numeric values ($150, ≥ 4.5, 3.0), value sets ({Nightlife, Museums}), operator directions (≥, ≤, ∈, ∉), scopes ([all] every item vs [any] at least one item), day indices, cuisines, house-rule flags — all MUST appear in your prose.
+- Each preference comes with a structured predicate. Threshold-style numeric values ($150, ≥ 4.5, 3.0), value sets ({Nightlife, Museums}), operator directions (≥, ≤, ∈, ∉, contains_all), scopes ([all] every item vs [any] at least one item), day indices, cuisines, house-rule flags — all MUST appear in your prose.
 - What you rewrite is the SURFACE NOTATION, not the values. Values survive; only notation naturalizes.
 - FAITHFULNESS — DO NOT INVENT QUANTIFIERS: Never add "at least one X and one Y" style quantifiers on a set unless the predicate explicitly requires them (i.e. an explicit temporal operator or an explicit count constraint). The set-membership operator `∈` alone is NOT a count constraint.
 - The reader must be able to recover threshold predicates from your prose. "≥ 3.0" is "at least 3.0" or "3.0 or higher", not "decent".
@@ -257,9 +276,9 @@ Set-based predicates like `Entity.attr ∈ {V1, V2, V3}` do NOT all mean the sam
     - NEVER write "at least one nightlife AND at least one museum" for `∈ {Nightlife, Museums}` — that adds a count/enumeration quantifier not in the predicate.
     - The scope tag ([all] / [any]) is the ONLY source of quantification; the set operator ∈ alone does not quantify.
 
-(b) AND-KIND sets — the exception. Attribute: house_rules. Elements of the set are treated as conjunctive: all listed rules apply together.
-    - `Accommodation.house_rules ∈ {smoking, parties}` → "the accommodation allows smoking and allows parties" (both, together).
-    - `Accommodation.house_rules ∉ {No smoking, No parties, No visitors}` → "the accommodation isn't restricted by no-smoking, no-parties, or no-visitors rules" (none of the three restrictions apply). This is the AND-kind reading of ∉: excludes ALL listed rules.
+(b) AND-KIND sets — the exception. Attribute: house_rules. Elements of the set are treated as conjunctive: all listed rules apply together. The AND-KIND *inclusion* is expressed with the `contains_all` operator (the item's house_rules list must contain EVERY listed rule); AND-KIND *exclusion* uses `∉` (item's list must contain NONE of the listed rules). Rule strings in the corpus are stored as negatively-phrased restrictions ("No smoking", "No parties", "No visitors", "No pets", "No children under 10") — the accommodation carries the rule when the item's list contains that "No X" string, meaning the property PROHIBITS X.
+    - `Accommodation.house_rules contains_all {No smoking, No parties}` → PREFER activity-based phrasing: "the accommodation prohibits both smoking and parties" / "the property forbids smoking and parties" / "we want a stay where smoking and parties are both off the table". A property-label paraphrase ("a no-smoking, no-parties property") is acceptable as a secondary form when it reads more naturally in context, but do NOT default to it. NEVER read this as "the accommodation allows smoking" — the "No" prefix on rule strings signals prohibition of the underlying activity.
+    - `Accommodation.house_rules ∉ {No smoking, No parties, No visitors}` → "the accommodation isn't restricted by no-smoking, no-parties, or no-visitors rules" (none of the three restrictions apply — visitors, smoking, and parties are all permitted). This is the AND-kind reading of ∉: excludes ALL listed rules.
 - SCOPE and set semantics COMPOSE:
     - `∈ {V1, V2} [scope: all]` — each item is one of {V1, V2} (OR-within-set, universal across items)
     - `∈ {V1, V2} [scope: any]` — at least one item is one of {V1, V2} (OR-within-set, existential)
@@ -267,15 +286,16 @@ Set-based predicates like `Entity.attr ∈ {V1, V2, V3}` do NOT all mean the sam
 
 NATURAL-LANGUAGE RENDERING OF PREDICATE NOTATION (cheatsheet — never leave structural notation like `Entity.attr ∈ {X}` or `hold_after(...)` or `min(...) via ...` in the prose; translate every construct):
 - `Entity.attr ∈ {V1, V2}` (OR-KIND) → *"<attr> like <V1> and <V2>"* / *"somewhere along the lines of <V1> or <V2>"*. NO invented count ("at least one X and one Y"); the scope tag is the only quantifier.
-- `Entity.attr ∈ {V1, V2}` (AND-KIND, house_rules only) → *"the accommodation allows <V1> and <V2>"* (both listed rules together).
+- `Entity.attr contains_all {V1, V2}` (AND-KIND — house_rules only) → PREFER *"the accommodation prohibits both <activity-of-V1> and <activity-of-V2>"* / *"we want somewhere that forbids <activity-of-V1> and <activity-of-V2>"* — surface the underlying ACTIVITY the "No X" rule prohibits, don't just repeat the "no-X" rule label. Acceptable secondary form: *"a <V1>, <V2> property"* when it flows better. The bank's values are "No X" strings — read them as prohibitions, not permissions.
 - `Entity.attr ∉ {V1, V2}` (OR-KIND) → *"not looking at places that are <V1> or <V2>"*.
-- `Entity.attr ∉ {V1, V2, V3}` (AND-KIND, house_rules only) → *"the accommodation isn't restricted by <V1>, <V2>, or <V3>"* (excludes all three).
+- `Entity.attr ∉ {V1, V2, V3}` (AND-KIND, house_rules only) → *"the accommodation isn't restricted by <V1>, <V2>, or <V3>"* (excludes all three — the underlying activities are permitted).
 - `Entity.attr ≥ N` / `≤ N` → *"rated N or above"*, *"at least $N per person per night"* (accommodation cost), *"under $N per person per meal"* (restaurant cost), *"no more than N"*.
 - Scope `[all]` → *"every …"*, *"each …"*, *"throughout the trip"* (universal — never insert "at least one").
 - Scope `[any]` → *"at least one …"*, *"somewhere on the trip"* (existential — this is the ONLY case where "at least one" is licensed).
 - Unscoped predicate → treat as universal by default; do NOT introduce "at least one".
 - `min(<attr>) via <agg> [lo, hi]` → *"ideally the <agg> <attr> across the trip is kept as low as possible"* — OMIT the [lo, hi] band.
 - `max(<attr>) via <agg> [lo, hi]` → *"ideally the <agg> <attr> across the trip trends as high as possible"* — OMIT the [lo, hi] band.
+- Substitute `<agg>` LITERALLY: `min`→*"minimum / lowest"*, `max`→*"maximum / highest"*, `avg`→*"average"*, `sum`→*"total"*.  DIRECTION and AGGREGATION are independent — do NOT collapse them.  Example trap: `max via min` = "the **minimum** <attr>… as **high** as possible" (raise the floor), NOT "the **highest** <attr>… as high as possible" (that silently switches agg from `min` to `max`).
 
 SEMANTIC SCOPING — WHERE EACH PREFERENCE KIND APPLIES (weave into the prose subtly, never as a rule listing; a reader should tell from HOW the preference locates itself in the trip, not by category labels):
 
@@ -378,6 +398,7 @@ WORKED VERBALIZATIONS — ONE EXAMPLE PER PARADIGM (study the pattern: every pre
 (4) NUMERIC — OPTIMIZATION — `max(Accommodation.review_rate) via min [1, 5]`
     rationale: "Prefer places with the least downside."
     verbalization: "I'm after places with the least downside, so I'd ideally like the trip's minimum accommodation review score to be as high as possible."
+    WRONG: "the trip's HIGHEST accommodation review score to be as high as possible" — flips agg from `min` to `max` (raises the ceiling, not the floor). Correct is "minimum / lowest / worst", never "highest".
     (The [1, 5] band is bookkeeping — never surfaced.)
 
 (5) CONDITIONAL — `IF Restaurant.cost ≥ 50 [any] THEN Restaurant.cost ≤ 15 [any]`
@@ -489,19 +510,36 @@ TONE — TWO REGISTERS, EACH IN ITS OWN SENTENCES:
     For [all]-scope preferences, express the universal target as a wish — "ideally every meal is rated 4.5 or better" (not "every meal must be rated 4.5+"). The universal "every / each / throughout" survives; only the demand language softens.
 
 SENTENCE-LEVEL SEPARATION (STRICT):
-Every sentence in the query is EITHER a constraint sentence OR a preference sentence — never both. Do NOT combine a constraint clause and a preference clause in the same sentence, even with "and" / semicolons / dashes. If a constraint and a preference are on the same topic (e.g. accommodation), place the constraint sentence first, then the preference sentence right after it — adjacent, but structurally separate.
+Every sentence in the output is EITHER a constraint sentence OR a preference sentence — never both. Do NOT combine a constraint clause and a preference clause in the same sentence, even with "and" / semicolons / dashes. The JSON split enforces this structurally at the paragraph level (constraint sentences live in `query_without_preferences`; preference sentences live in `only_preferences`), and the same rule applies at the sentence level within each part.
 - WRONG: "The accommodation has to allow smoking, and I'd ideally like every stay under $150 per person per night."   ← constraint + preference in one sentence
-- RIGHT: "The accommodation has to allow smoking. On top of that, I'd ideally like every stay to come in under $150 per person per night."
+- RIGHT (constraint sentence in `query_without_preferences`, preference sentence in `only_preferences`; the transition wording is illustrative — vary it per the STRUCTURE rule above):
+  Part 1 ends: "…The accommodation has to allow smoking."
+  Part 2 opens (one natural continuation among many): "Ideally every stay comes in at $150 per person per night or less…"
 - WRONG: "We need Mexican and Chinese cuisine covered, but I'd hope every restaurant is rated 3.0 or better."   ← same
-- RIGHT: "We need Mexican and Chinese cuisine covered across the meals. That said, I'd hope every restaurant we sit down to is rated 3.0 or better."
-The trip-anchoring opener (framing, origin, destination, dates, duration, travelers, budget) is neither a constraint nor a preference — it can stand as its own opening sentence(s).
+- RIGHT:
+  Part 1 ends: "…We need Mexican and Chinese cuisine covered across the meals."
+  Part 2 opens (illustrative): "Where possible, we'd hope every restaurant we sit down to is rated 3.0 or better…"
+The trip-anchoring opener (framing, origin, destination, dates, duration, travelers, budget) is neither a constraint nor a preference — it stands as its own opening sentence(s) at the head of `query_without_preferences`.
 
-STRUCTURE — ONE OR TWO NATURAL PARAGRAPHS, TOPICALLY INTERLEAVED:
-Do NOT front-load ALL constraint sentences and then dump ALL preference sentences (that recreates the two-block layout). Instead, interleave BY TOPIC — one topic at a time:
-- Group by topic (accommodation, food/cuisine, attractions, transportation, budget, day-by-day rhythm, etc.). Within each topic, put the constraint sentence(s) first and the preference sentence(s) immediately after, so a topic-block might look like "[accommodation constraint sentence]. [accommodation preference sentence]." then move on to the next topic.
-- Open by anchoring the trip (framing + origin + destination + dates + duration + travelers + budget). Both start and end dates must appear explicitly ("from <start> to <end>", "<start> through <end>", etc.), along with the number of days.
-- Omit any locked-in item marked "(none)".
-- Total output: 1–2 flowing paragraphs. Vary sentence openings; don't number preferences.
+STRUCTURE — TWO OUTPUT PARTS EMITTED AS JSON (STRICT):
+The final output is a JSON object with EXACTLY two string-valued keys:
+
+  "query_without_preferences" — the trip-anchoring opener followed by all locked-in trip facts (framing, origin, destination, dates, duration, travelers, budget) and all HARD LOCAL CONSTRAINTS. This part reads as a complete, natural trip request that INTENTIONALLY OMITS every soft preference. Nothing preference-derived may leak into this part.
+    - Open by anchoring the trip (framing + origin + destination + dates + duration + travelers + budget). Both start and end dates must appear explicitly ("from <start> to <end>", "<start> through <end>", etc.), along with the number of days.
+    - Constraint sentences follow, grouped by topic (accommodation, food/cuisine, transportation, etc.). Omit any locked-in item marked "(none)".
+    - No "I'd ideally like", "we'd prefer", "hoping for", or any aspirational wording — that is preference language and belongs only in the second part.
+    - This part is one flowing paragraph.
+
+  "only_preferences" — all soft preferences, in their own flowing paragraph. NO trip facts, NO hard constraints, NO re-opening the trip. This part must read as a NATURAL CONTINUATION of "query_without_preferences" when the two are concatenated with a single space between them.
+    - The opening of this part is the transition from firm-constraint prose into aspirational prose.  It should sound like the same traveler continuing to talk — not like a form field labelled "preferences".  Write whatever opener fits THIS trip's tone: sometimes it flows straight from the last constraint (*"With the accommodation side sorted, …"*, *"With that settled, we'd also love …"*, *"Beyond those basics, …"*), sometimes it dives into the first preference directly with wish-language (*"Ideally, for the stay …"*, *"Where possible, …"*), sometimes it names the shift explicitly (*"For the softer side of things, …"*, *"As for what would make this really land, …"*).  Do not default to any one phrase across renderings — vary the opening the way a real traveler naturally would.  A bare leading conjunction (*"And …"*, *"Plus …"*) reads as abrupt; anything with a scent of continuation is fine.
+    - Then cover every preference, one sentence per preference, still respecting the CONNECTING TWO PREFERENCES ON THE SAME TOPIC rule below (refinement wording, not parallel restatement, when two preferences touch the same topic).
+    - Preference sentences may be topically grouped (all accommodation prefs together, all food prefs together, etc.) — within a topic, respect the refinement/subset/scope-carve-out/priority-ranking connective rule.
+    - No constraint sentences here. If a topic has both a constraint (which lives in part 1) and a preference (which lives here), the preference sentence in part 2 must NOT re-mention the constraint — the reader has already seen it.
+    - This part is one flowing paragraph.
+
+CONCATENATION CHECK: read `query_without_preferences + " " + only_preferences` end-to-end and ask "does this read as one natural trip-request message from a single traveler?" — if the answer is no (abrupt topic pivot, missing connector, repeated trip facts, mismatched pronoun), rewrite the connector or the pronoun until it does.
+
+If there are NO preferences to cover (structurally rare, but possible), still emit both keys — `"only_preferences"` is the empty string `""` in that case.
 
 CONNECTING TWO PREFERENCES ON THE SAME TOPIC — REFINEMENT, NOT RESTATEMENT:
 When two DIFFERENT structural preferences (e.g. a Composite and a Scoped, or an Atomic and a Compensatory) touch the SAME topic (both about attractions, both about restaurants, etc.), keep them in SEPARATE sentences — never merge into one clause — but the second sentence must READ AS A REFINEMENT of the first, not a parallel restatement. Two structurally-independent preferences on the same topic are usually related by narrowing (subset), scope (only on certain days / meal slots), tightening (existential highlight on top of a universal floor), or ranking (priority ordering). Use a CONNECTIVE that shows the relationship:
@@ -532,16 +570,38 @@ The query should be coherent but not verbose. Every preference must still carry 
 - Don't expand a predicate into an operational explanation ("if a meal comes in at 3.5 or lower, the next dining slot that day should be at 3.5 or higher — a recovery within one slot rather than letting two mediocre meals stack up" — the trailing "a recovery within one slot ..." just re-explains the predicate).
 - Keep rationale content when it adds motivation beyond the predicate ("wants real ordinary food", "as a celebratory finale", "given the mid-range is worst value") — but keep it short: a clause, not a paragraph.
 - A rationale that clashes with the trip context still gets generalized (per the RATIONALES section), not dropped.
-Rule of thumb: each preference is ONE tight sentence containing predicate + brief rationale clause, unless the predicate itself is complex enough (lex, compensatory, conditional) to justify two.
+Rule of thumb: EACH preference is EXACTLY ONE sentence, and EACH constraint is EXACTLY ONE sentence — no exceptions.  Composite / Lexicographic / Compensatory / Conditional / Scoped / Temporal preferences are ONE sentence each, no matter how many operands, ranked slots, primary/margin/secondary parts, or ordering clauses they carry — pack every named part into a single connected sentence with commas, semicolons, or subordinate clauses as needed.  Do NOT split a complex preference across two sentences even when it "feels long"; a single well-structured sentence is what the reader is meant to see (predicate + brief rationale, in one).  The topical grouping rule above (constraint-first, preference-immediately-after, within each topic) still governs order — one-sentence-per-item just enforces the granularity within that order.
 
 DRIFT — NEVER EXPLICIT:
 The structured input labels each preference with a drift_state (aligned / concession / self_compromise / fallback_hedge). This is an internal diagnostic; do NOT reveal it or hint at compromise/trade-off/give-and-take/"agreed on"/"settled on"/"against my usual inclination"/etc. Every preference reads in the same soft aspirational register. The profile↔preference gap is exactly what downstream systems will be tested on — don't spot it for them.
 
-PRONOUN AGREEMENT WITH TRIP CONTEXT (STRICT):
-Even though we drop drift-indicating wording, pronoun choice MUST match the trip context. Do NOT default to "I" on a multi-person trip or "we" on a solo trip — this creates an unintentional mismatch signal.
-- If people_number == 1 (solo trip): use "I" / "me" / "my" throughout. Never say "we" or "us".
-- If people_number > 1 (partner / family / friend / group trip): use "we" / "us" / "our" for constraints, preferences, and rationale clauses. Never slip into "I".
-- Apply this pronoun rule to rationales too. On a 2-person trip a rationale like "keeping overnight spending frugal is the mode I'm in" should read "the mode we're in".
+PRONOUN AGREEMENT WITH TRIP CONTEXT (STRICT — HIGH-VIOLATION AREA):
+Pronoun choice MUST match the trip context.  This is the single most-often-violated rule in past renders; scan the paragraph before you emit and rewrite any mismatched pronoun.
+- If people_number == 1 (solo trip): use "I" / "me" / "my" throughout.  Never say "we" / "us" / "our" ANYWHERE past the opener — not in constraints, not in preferences, not in rationales, not in subordinate clauses.  Even a single "we'd like" or "the place we stay" is a violation.
+- If people_number > 1 (partner / family / friend / group trip): use "we" / "us" / "our" for constraints, preferences, and rationale clauses.  Never slip into "I" past the opener.
+
+CONCRETE NEGATIVE EXAMPLES — do NOT produce these forms.
+
+  Solo trip (people_number == 1):
+    WRONG: "For food, we'd ideally like every restaurant to be rated 3.0 or higher."
+    RIGHT: "For food, I'd ideally like every restaurant to be rated 3.0 or higher."
+
+    WRONG: "we'd ideally like every attraction rated 4.5 or higher"
+    RIGHT: "I'd ideally like every attraction rated 4.5 or higher"
+
+  Multi-person trip (people_number > 1):
+    WRONG: "I'd ideally like every stay under $150 per person per night."
+    RIGHT: "we'd ideally like every stay under $150 per person per night."
+
+    WRONG: "I'm looking for restaurants rated 4.5 or higher throughout the trip."
+    RIGHT: "we're looking for restaurants rated 4.5 or higher throughout the trip."
+
+RATIONALE PRONOUNS follow the same rule:
+- Solo trip rationale: "keeping overnight spending frugal is the mode I'm in".
+- Multi-person trip rationale: "keeping overnight spending frugal is the mode we're in".
+
+FINAL SELF-CHECK (mandatory pass before emitting the query):
+Read every sentence in BOTH JSON parts after the opener (the opener lives in `query_without_preferences`; every sentence after it — remaining sentences in `query_without_preferences` AND every sentence in `only_preferences` — is in scope for this check).  On a SOLO trip (people_number == 1), if you find any of "we / us / our / we'd / we're / we'll / we've" — rewrite that sentence with the corresponding first-person-singular form.  On a MULTI-PERSON trip (people_number > 1), if you find any of "I / me / my / I'd / I'm / I've" past the opener — rewrite with the corresponding plural form.  Both parts must pass this scan before emitting.
 
 OPENING SENTENCE — TWO ALLOWED FORMS:
 The opener (the trip-anchoring first sentence) is exempt from the strict "we"-only rule on multi-person trips, and may take EITHER of two forms — pick freely:
@@ -621,7 +681,10 @@ LOCKED-IN TRIP FACTS (must all appear as decisions-already-made; omit any "(none
 PREFERENCES TO COVER (every predicate value below must survive into the prose in natural English; rationales repurposed per the rule above):
 {preferences}
 
-Write the trip request now as ONE or TWO flowing paragraphs. Output only the message — no preamble, no closing remarks."""
+Write the trip request now. Output ONLY a single JSON object with exactly the two keys `"query_without_preferences"` and `"only_preferences"` — no preamble, no closing remarks, no markdown code fences. Newlines inside the string values must be escaped as `\\n`, and any double-quote inside a value must be escaped as `\\"`. The response must start with `{` and end with `}`.
+
+Example shape (values illustrative — replace with the actual paragraphs):
+{"query_without_preferences": "<paragraph 1: opener + trip facts + hard constraints>", "only_preferences": "<paragraph 2: preferences only, starting with a soft connector>"}"""
 
 
 # --------------------------------------------------------------------------- #
@@ -717,6 +780,12 @@ class AnthropicBackend(Backend):
                     try:
                         text = f.result()
                     except Exception as e:
+                        # Surface the exception so silent-empty runs stop
+                        # slipping past the cache.  Keep the run going --
+                        # other prompts may still succeed -- but every
+                        # skipped call gets a clearly-labelled stderr line.
+                        print(f"\n[error-{idx}] {type(e).__name__}: {e}",
+                              file=sys.stderr, flush=True)
                         text = ""
                     results[idx] = text
                     if on_result is not None and text:
@@ -769,17 +838,31 @@ class OpenAIBackend(Backend):
             try:
                 # GPT-5-family reasoning models: `temperature` MUST be
                 # the default (1); anything else raises unsupported_value.
-                # Omit it entirely so the SDK uses the default.  A
-                # minimal reasoning effort suffices for the prose-
-                # rewriting task and keeps latency + cost down.
+                # Omit it entirely so the SDK uses the default.  Reasoning
+                # effort is set to "low" -- the API's post-2025-07 enum
+                # dropped the "minimal" value in favour of
+                # {none, low, medium, high, xhigh}; "low" is the closest
+                # match to the original intent (light reasoning that
+                # still fits comfortably inside max_completion_tokens).
                 resp = self.client.chat.completions.create(
                     model                  = self.model,
                     messages               = [{"role": "user", "content": prompt}],
                     max_completion_tokens  = max_tokens,
-                    reasoning_effort       = "minimal",
+                    reasoning_effort       = "none",
                     verbosity              = "medium",
                 )
-                return (resp.choices[0].message.content or "").strip()
+                # Debug hook: LLM_NL_DEBUG=1 dumps every response;
+                # LLM_NL_DEBUG=empty dumps only responses with empty content.
+                content = resp.choices[0].message.content
+                dbg = os.environ.get("LLM_NL_DEBUG", "")
+                if dbg == "1" or (dbg == "empty" and not content):
+                    try:
+                        dump = resp.model_dump_json(indent=2)
+                    except Exception:
+                        dump = repr(resp)
+                    print(f"\n[debug-resp] max_completion_tokens={max_tokens}\n"
+                          f"{dump}", file=_sys.stderr, flush=True)
+                return (content or "").strip()
             except RateLimitError as e:
                 msg = str(getattr(e, "message", e))
                 # Try to extract "Please try again in Xms" or "Xs".
@@ -830,6 +913,12 @@ class OpenAIBackend(Backend):
                     try:
                         text = f.result()
                     except Exception as e:
+                        # Surface the exception so silent-empty runs stop
+                        # slipping past the cache.  Keep the run going --
+                        # other prompts may still succeed -- but every
+                        # skipped call gets a clearly-labelled stderr line.
+                        print(f"\n[error-{idx}] {type(e).__name__}: {e}",
+                              file=sys.stderr, flush=True)
                         text = ""
                     results[idx] = text
                     if on_result is not None and text:
@@ -1110,9 +1199,9 @@ def generate_all(records: list[dict], backend: Backend, cache_path: Path, *,
     for rec in records:
         qid = rec["query_id"]
         if (qid, "profile") not in cache:
-            pending.append((qid, "profile", build_profile_prompt(rec), 2048))
+            pending.append((qid, "profile", build_profile_prompt(rec), 2048)) # 2048
         if (qid, "query") not in cache:
-            pending.append((qid, "query",   build_query_prompt(rec),   2048))
+            pending.append((qid, "query",   build_query_prompt(rec),   2048)) # 2048
 
     if verbose:
         print(f"[run] backend={backend.name}  pending={len(pending)}  "
@@ -1154,11 +1243,75 @@ def generate_all(records: list[dict], backend: Backend, cache_path: Path, *,
               f"({len(texts)/max(dt, 1e-6):.2f} prompts/sec)")
 
 
+def _parse_query_output(text: str) -> tuple[str | None, str | None]:
+    """Parse the LLM's query response into ``(without_prefs, only_prefs)``.
+
+    The prompt asks for a bare JSON object with two string keys.  In
+    practice models sometimes wrap the object in a ```json fenced block
+    or add a stray line before / after.  We strip fences, locate the
+    first ``{`` and last ``}`` in the text, and try ``json.loads`` on
+    that slice.  On any failure we return ``(None, None)`` so callers
+    can treat the payload as a LEGACY plain-text query.
+
+    Returns:
+        (without_prefs, only_prefs) as stripped strings, or (None, None)
+        if the payload cannot be parsed as the expected JSON shape.
+    """
+    if not text:
+        return None, None
+    s = text.strip()
+    if s.startswith("```"):
+        # strip a fenced ```json ... ``` (or ``` ... ```) wrapper
+        s = s.split("\n", 1)[1] if "\n" in s else s
+        if s.endswith("```"):
+            s = s[: -3].rstrip()
+    lb, rb = s.find("{"), s.rfind("}")
+    if lb == -1 or rb == -1 or rb <= lb:
+        return None, None
+    try:
+        obj = json.loads(s[lb : rb + 1])
+    except (ValueError, TypeError):
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    a = obj.get("query_without_preferences")
+    b = obj.get("only_preferences")
+    if not isinstance(a, str):
+        return None, None
+    if b is None:
+        b = ""
+    if not isinstance(b, str):
+        return None, None
+    return a.strip(), b.strip()
+
+
+def _combine_query(without_prefs: str, only_prefs: str,
+                   connector: str = " ") -> str:
+    """Join the preference-free base and the preference-only continuation
+    into the single combined query string.  Empty ``only_prefs`` degrades
+    gracefully to just ``without_prefs``."""
+    a = (without_prefs or "").strip()
+    b = (only_prefs or "").strip()
+    if not b:
+        return a
+    if not a:
+        return b
+    return a + connector + b
+
+
 def merge_into_jsonl(records: list[dict], in_path: Path, out_path: Path,
                      cache_path: Path) -> None:
     """Read the JSONL again (to preserve any records not in our slice),
     annotate from ``cache_path``, and write to ``out_path``.  ``out_path``
-    is model-scoped by default so parallel runs stay isolated."""
+    is model-scoped by default so parallel runs stay isolated.
+
+    Query cache entries whose ``text`` is the two-key JSON payload are
+    split into ``llm_nl_query_without_preferences`` + ``llm_nl_only_preferences``
+    (both stored as-is) plus the combined ``llm_nl_query`` (the two joined
+    by a single space).  Any legacy cache entries that are not valid JSON
+    are treated as plain-text queries: ``llm_nl_query`` gets the raw text
+    and the two split fields are left absent.
+    """
     cache = _load_cache(cache_path)
     full = []
     with in_path.open() as f:
@@ -1167,17 +1320,29 @@ def merge_into_jsonl(records: list[dict], in_path: Path, out_path: Path,
             if not line:
                 continue
             full.append(json.loads(line))
-    n_p = n_q = 0
+    n_p = n_q = n_split = n_legacy = 0
     for rec in full:
         qid = rec["query_id"]
         if (qid, "profile") in cache:
-            rec["llm_nl_profile"] = cache[(qid, "profile")]; n_p += 1
+            rec["llm_nl_profile"] = cache[(qid, "profile")]
+            n_p += 1
         if (qid, "query") in cache:
-            rec["llm_nl_query"]   = cache[(qid, "query")];   n_q += 1
+            raw = cache[(qid, "query")]
+            without_p, only_p = _parse_query_output(raw)
+            if without_p is not None:
+                rec["llm_nl_query_without_preferences"] = without_p
+                rec["llm_nl_only_preferences"]          = only_p
+                rec["llm_nl_query"]                     = _combine_query(without_p, only_p)
+                n_split += 1
+            else:
+                rec["llm_nl_query"] = raw
+                n_legacy += 1
+            n_q += 1
     with out_path.open("w") as f:
         for rec in full:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"[out] merged {n_p} llm_nl_profile, {n_q} llm_nl_query into "
+    print(f"[out] merged {n_p} llm_nl_profile, {n_q} llm_nl_query "
+          f"(split={n_split}, legacy={n_legacy}) into "
           f"{len(full)} records → {out_path}")
 
 

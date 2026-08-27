@@ -399,6 +399,54 @@
       "source_id": 52,
       "rationale": "First-time visitor to city; iconic landmarks are the minimum justification for the trip.",
       "raw_source": "Attraction.category ∈ {Sights & Landmarks} [scope: any]"
+    },
+    {
+      "id": 26,
+      "template": {
+        "entity_type": "Accommodation",
+        "attribute": "cost",
+        "op": ">=",
+        "value": null,
+        "scope": "all"
+      },
+      "example_values": {
+        "default": { "value": 100, "stat_based_value": "Q1" }
+      },
+      "source_id": null,
+      "rationale": "Trip after a run of poor budget-rental stays hence would like to skip the cheapest lodging tier.",
+      "raw_source": "Accommodation.price ≥ 100 [scope: all]",
+    },
+    {
+      "id": 27,
+      "template": {
+        "entity_type": "Restaurant",
+        "attribute": "cost",
+        "op": ">=",
+        "value": null,
+        "scope": "all"
+      },
+      "example_values": {
+        "default": { "value": 15, "stat_based_value": "Q1" }
+      },
+      "source_id": null,
+      "rationale": "Avoiding the cheapest eateries and holding a price floor across every meal as a food-safety precaution rather than luxury choice.",
+      "raw_source": "Restaurant.cost ≥ 15 [scope: all]",
+    },
+    {
+      "id": 28,
+      "template": {
+        "entity_type": "Attraction",
+        "attribute": "rating",
+        "op": ">=",
+        "value": null,
+        "scope": "all"
+      },
+      "example_values": {
+        "default": { "value": 2.5, "stat_based_value": "Q1" }
+      },
+      "source_id": null,
+      "rationale": "Stay clear of extremely low-rated places as they are often disappointing, scammy, or of no value for time.",
+      "raw_source": "Attraction.rating ≥ 2.5 [scope: all]",
     }
   ],
   "CompositePreference": [ 
@@ -700,7 +748,7 @@
             "class": "AtomicPreference",
             "entity_type": "Accommodation",
             "attribute": "house_rules",
-            "op": "in",
+            "op": "contains_all",
             "value": null,
             "scope": "all"
           }
@@ -929,6 +977,76 @@
       "source_id": 26,
       "rationale": "Wants relaxed leisure like arcades without the exhaustion and expense of a massive theme park.",
       "raw_source": "Attraction.category ∈ {Fun & Games} [any] AND Attraction.category not_in {Water & Amusement Parks} [all]"
+    },
+    {
+      "id": 16,
+      "template": {
+        "op": "AND",
+        "children": [
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Restaurant",
+            "attribute": "cost",
+            "op": ">=",
+            "value": null,
+            "scope": "all"
+          },
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Accommodation",
+            "attribute": "cost",
+            "op": ">=",
+            "value": null,
+            "scope": "all"
+          }
+        ]
+      },
+      "example_values": {
+        "default": {
+          "children": [
+            { "value": 15, "stat_based_value": "Q1" },
+            { "value": 100, "stat_based_value": "Q1" }
+          ]
+        }
+      },
+      "source_id": null,
+      "rationale": "Philosophy for quality: avoid cheap diners and cheap accommodation below a reasonable value as extremely cheap are often bad and unsatisfying.",
+      "raw_source": "Restaurant.cost ≥ 15 [all] AND Accommodation.price ≥ 100 [all]",
+    },
+    {
+      "id": 17,
+      "template": {
+        "op": "AND",
+        "children": [
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Attraction",
+            "attribute": "rating",
+            "op": ">=",
+            "value": null,
+            "scope": "all"
+          },
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Accommodation",
+            "attribute": "cost",
+            "op": ">=",
+            "value": null,
+            "scope": "all"
+          }
+        ]
+      },
+      "example_values": {
+        "default": {
+          "children": [
+            { "value": 2.5, "stat_based_value": "Q1" },
+            { "value": 100, "stat_based_value": "Q1" }
+          ]
+        }
+      },
+      "source_id": null,
+      "rationale": "Philosophy for quality: avoid bottom-tier rated visits and cheap accommodation below a reasonable value as extremely low-rated and cheap are often bad and unsatisfying.",
+      "raw_source": "Attraction.rating ≥ 2.5 [all] AND Accommodation.price ≥ 100 [all]",
     }
   ],
   "NumericPreference": [ 
@@ -943,8 +1061,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [10, 250],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [10, 70, 130, 190, 250],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 1,
@@ -962,8 +1080,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 5],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 2,
@@ -981,8 +1099,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [50, 1200],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [50, 340, 620, 910, 1200],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 3,
@@ -1000,8 +1118,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 5],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 4,
@@ -1019,8 +1137,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 4.9],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 6,
@@ -1038,8 +1156,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 5],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 7,
@@ -1057,8 +1175,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [10, 250],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [10, 70, 130, 190, 250],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 10,
@@ -1076,8 +1194,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [5, 6800],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [10, 1700, 3400, 5100, 6800],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 12,
@@ -1095,8 +1213,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [10, 250],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [10, 70, 130, 190, 250],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 14,
@@ -1114,8 +1232,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 5],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 20,
@@ -1133,8 +1251,8 @@
       },
       "example_values": {
         "default": {
-          "threshold": [1, 5],
-          "stat_based_threshold": ["Q0", "Q4"]
+          "threshold": [1, 2, 3, 4, 4.9],
+          "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"]
         }
       },
       "source_id": 30,
@@ -1921,6 +2039,40 @@
       "source_id": 30,
       "rationale": "Atmosphere and social energy of the activity matter more than whether every attraction is top-rated; would rather have memorable nightlife and interactive experiences than only visit highly reviewed places.",
       "raw_source": "Attraction.category ∈ {Nightlife, Fun & Games} [any] ≻ Attraction.rating ≥ 4 [any]"
+    },
+    {
+      "id": 15,
+      "template": {
+        "preferences": [
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Restaurant",
+            "attribute": "cuisine",
+            "op": "in",
+            "value": null,
+            "scope": "any"
+          },
+          {
+            "class": "AtomicPreference",
+            "entity_type": "Restaurant",
+            "attribute": "cost",
+            "op": "<=",
+            "value": null,
+            "scope": "all"
+          }
+        ]
+      },
+      "example_values": {
+        "default": {
+          "preferences": [
+            { "value": ["Chinese", "American"] },
+            { "value": 50, "stat_based_value": "Q2" }
+          ]
+        }
+      },
+      "source_id": null,
+      "rationale": "Need to satisfy our taste buds with our favourite cuisine at least once is preferred over strictly optimizing for cost.",
+      "raw_source": "Restaurant.cuisine in {Chinese, American} [any] ≻ Restaurant.cost ≤ 50 [all]"
     }
   ],
   "CompensatoryPreference": [ 
@@ -2389,7 +2541,7 @@
         }
       },
       "source_id": 24,
-      "rationale": "Strongly prefers excellent accommodation but will lower standards drastically if the hotel is genuinely very cheap.",
+      "rationale": "Strongly prefers excellent accommodation but will lower standards drastically if the hotel has better affordability.",
       "raw_source": "PRIMARY: Accommodation.review_rate ≥ 4.5 | MARGIN: ≥ 3.5 | SECONDARY: Accommodation.price ≤ 80"
     },
     {
@@ -2469,6 +2621,45 @@
       "source_id": 27,
       "rationale": "Wants live music but will go to a highly-rated nightclub as a fallback if no concert is available.",
       "raw_source": "PRIMARY: Attraction.category ∈ {Concerts & Shows} | MARGIN: Nightlife | SECONDARY: Attraction.rating ≥ 4.0"
+    },
+    {
+      "id": 15,
+      "template": {
+        "primary_ap": {
+          "class": "AtomicPreference",
+          "entity_type": "Attraction",
+          "attribute": "rating",
+          "op": "<=",
+          "value": null,
+          "scope": "all"
+        },
+        "margin_ap": {
+          "class": "AtomicPreference",
+          "entity_type": "Attraction",
+          "attribute": "rating",
+          "op": ">=",
+          "value": null,
+          "scope": "all"
+        },
+        "secondary_ap": {
+          "class": "AtomicPreference",
+          "entity_type": "Accommodation",
+          "attribute": "room_type",
+          "op": "in",
+          "value": null,
+          "scope": "any"
+        }
+      },
+      "example_values": {
+        "default": {
+          "primary_ap":   { "value": 4.5, "stat_based_value": "Q3" },
+          "margin_ap":    { "value": 4.5, "stat_based_value": "Q3" },
+          "secondary_ap": { "value": ["Entire home/apt", "Private room"] }
+        }
+      },
+      "source_id": null,
+      "rationale": "Prefer good attractions with local feel and sense of common belonging, can go for extremely highly-rated places which are often too crowded or touristy for our taste, provided we have a private accommodation space to ourselves.",
+      "raw_source": "PRIMARY: Attraction.rating ≤ 4.5 | MARGIN: Attraction.rating ≥ 4.5 | SECONDARY: Accommodation.room_type ∈ {Entire home/apt, Private room}"
     }
   ],
   "TemporalPreference": {
@@ -3391,7 +3582,7 @@
             "class": "AtomicPreference",
             "entity_type": "Accommodation",
             "attribute": "house_rules",
-            "op": "in",
+            "op": "contains_all",
             "value": null,
             "scope": "any"
           },
@@ -3585,7 +3776,7 @@
             "class": "AtomicPreference",
             "entity_type": "Accommodation",
             "attribute": "house_rules",
-            "op": "in",
+            "op": "contains_all",
             "value": null,
             "scope": "any"
           },
@@ -5269,13 +5460,13 @@
       "example_values": {
         "default": {
           "inner": { "value": ["Boat Tours & Water Sports"] },
-          "scope_filters": { "value": "San Francisco" }
+          "scope_filters": { "value": "Miami" }
         },
         "3": null
       },
       "source_id": 5,
-      "rationale": "SF's bay geography makes a water tour both uniquely feasible and culturally specific to this city.",
-      "raw_source": "WHEN Day.city = San Francisco: Attraction.category ∈ {Boat Tours & Water Sports}",
+      "rationale": "Miami's bay geography makes a water tour both uniquely feasible and culturally specific to this city.",
+      "raw_source": "WHEN Day.city = Miami: Attraction.category ∈ {Boat Tours & Water Sports}",
       "notes": "TODO: Materialize through city-attraction placeholders for multi-city scenarios."
     },
     {
@@ -5312,7 +5503,7 @@
       },
       "source_id": 6,
       "rationale": "Long visit hour attractions such as Museum, Nature & Parks, or Water & Amusement Parks are to be meaningfully scheduled on full stay days, not on travel days.",
-      "raw_source": "WHEN Day.travel_type = stay: Attraction.category ∈ {Museums, Nature & Parks, Water & Amusement Parks}"
+      "raw_source": "WHEN Day.travel_phase = stay: Attraction.category ∈ {Museums, Nature & Parks, Water & Amusement Parks}"
     },
     {
       "id": 5,
@@ -5773,7 +5964,7 @@
       },
       "source_id": 38,
       "rationale": "Souvenir and shopping activities at the end of the leg in each city.",
-      "raw_source": "WHEN Day.travel_type in {departure}: Attraction.category ∈ {Shopping}"
+      "raw_source": "WHEN Day.travel_phase in {departure}: Attraction.category ∈ {Shopping}"
     },
     {
       "id": 17,
@@ -5948,7 +6139,7 @@
       },
       "example_values": {
         "default": {
-          "inner": { "threshold": [1, 5], "stat_based_threshold": ["Q0", "Q4"] },
+          "inner": { "threshold": [1, 2, 3, 4, 5], "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"] },
           "scope_filters": { "value": ["Museums"] }
         },
       },
@@ -5985,7 +6176,7 @@
       },
       "example_values": {
         "default": {
-          "inner": { "threshold": [10, 250], "stat_based_threshold": ["Q0", "Q4"] },
+          "inner": { "threshold": [10, 70, 130, 190, 250], "stat_based_threshold": ["Q0", "Q1", "Q2", "Q3", "Q4"] },
           "scope_filters": { "value": "lunch" }
         },
       },

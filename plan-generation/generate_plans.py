@@ -37,23 +37,59 @@ Supports three backends (pick via ``--backend`` or env ``LLM_PLAN_BACKEND``):
     vllm-offline -- In-process vLLM.     Batched inference.
 
 Sidecar cache at ``plan-generation/plan_cache_<backend>_<model>.jsonl``
-keyed by dataset row index so runs are resumable across the private→
-public transition.  The cache file name is model-specific (mirroring
-``--out``) so multiple simultaneous runs with different backends /
-models don't clobber each other's caches.
+keyed by the HF dataset's ``id`` (1-indexed contiguous integer, present
+on every row of both ``test`` and ``test_large``).  Each cache entry
+also stores ``source_id`` -- an integer on ``test`` (pointer into
+``test_large``) and ``null`` on ``test_large`` -- so a cache from one
+split can be promoted to the other without any re-generation.  Cache
+file names are model-specific (mirroring ``--out``) so simultaneous
+runs against different backends / models never collide.
 
 Output: JSONL at ``--out`` (default:
 ``plan-generation/plans_<backend>_<model>.jsonl``) with, per row,
-``{"idx", "profile", "query", "reference_information", "llm_travel_plan"}``.
+``{"id", "source_id", "profile", "query", "reference_information",
+"llm_travel_plan", "llm_reasoning"}``.  ``llm_reasoning`` carries the
+model's reasoning trace when the backend surfaces one (OpenAI Responses
+API reasoning items, OpenRouter's ``message.reasoning``, vLLM's
+``reasoning_content`` or extracted ``<think>...</think>`` blocks,
+Anthropic's ``thinking`` content blocks); ``None`` otherwise.
+
+The output file MIRRORS THE CACHE (cumulative across partial runs):
+it emits exactly the rows whose plans are in the cache, sorted by
+dataset ``id`` -- so ``--sample-id 1,10,17`` produces a 3-line file
+whose ``id`` values are 1/10/17, and a subsequent run APPENDS new
+plans without clobbering earlier ones.  Rows never dispatched are
+simply absent from the file; there is no ``None``-padding.
 The input HF dataset is treated as read-only.
+
+Cross-split cache promotion (``--seed-cache``):
+  Passing ``--seed-cache PATH`` before generation merges a cache from
+  the OTHER split into the primary cache, avoiding re-generation of
+  overlapping rows.  Direction is inferred from the target ``--split``:
+    * target=test_large, seed=test cache   -> each seed entry with
+        source_id=N is written as a test_large cache entry keyed by
+        id=N (source_id=null).
+    * target=test, seed=test_large cache   -> for each test row whose
+        source_id equals a seed entry's id, that seed entry is written
+        as a test cache entry keyed by the matching test id (with
+        source_id set to the seed id).
+  Primary-cache entries win on any id collision.  The seed file is
+  unchanged; promoted entries are appended to ``--cache``.
+
+Legacy files: existing plan_cache_* / plans_* files that were keyed
+by 0-indexed ``idx`` predate this schema.  Convert them once with the
+one-off script ``plan-generation/migrate_legacy_cache.py`` (uses the
+HF split to map every legacy ``idx`` to its ``id`` / ``source_id``).
 
 Usage:
   python3 plan-generation/generate_plans.py                              # anthropic default
   python3 plan-generation/generate_plans.py --backend openai --model gpt-4o-mini
   python3 plan-generation/generate_plans.py --backend vllm-offline --model meta-llama/Llama-3.1-8B-Instruct
   python3 plan-generation/generate_plans.py --sample 5                   # smoke test
-  python3 plan-generation/generate_plans.py --sample-idx 0,10,17         # by dataset row index
+  python3 plan-generation/generate_plans.py --sample-id 1,10,17          # by dataset id (1-indexed)
   python3 plan-generation/generate_plans.py --hf-token hf_xxx            # private repo phase
+  python3 plan-generation/generate_plans.py --split test_large \\
+      --seed-cache plan_cache_.../test.jsonl                             # promote test cache -> test_large
 """
 from __future__ import annotations
 
@@ -76,54 +112,28 @@ TEMPERATURE = 0.2
 
 
 # --------------------------------------------------------------------------- #
-# Progress reporter                                                           #
+# Backends, progress reporting, and sampling defaults now live in            #
+# ``llm_backends`` so the agentic track can drive models through the same    #
+# clients and the same retry ladder. Imported back under their original      #
+# names: every reference below this point is unchanged.                      #
 # --------------------------------------------------------------------------- #
-class _ProgressReporter:
-    def __init__(self, total: int, label: str = "generating"):
-        self.total = total
-        self.done  = 0
-        self.label = label
-        self.start = time.time()
-        self._last_line_len = 0
-        self._tqdm = None
-        try:
-            from tqdm import tqdm as _tqdm
-            self._tqdm = _tqdm(total=total, desc=label, unit="req",
-                               dynamic_ncols=True, mininterval=0.3, leave=True)
-        except Exception:
-            self._fallback_write(f"[progress] {label}: 0/{total} (starting...)")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_backends import (            # noqa: E402
+    TEMPERATURE,
+    _ProgressReporter,
+    _completion,
+    _split_think,
+    _extract_reasoning_from_openai_message,
+    _sampling_kwargs,
+    _OPENAI_ENDPOINTS,
+    Backend,
+    AnthropicBackend,
+    OpenAIBackend,
+    OpenRouterBackend,
+    VLLMOfflineBackend,
+    make_backend,
+)
 
-    def _fmt_dt(self, s: float) -> str:
-        s = int(max(s, 0))
-        h, rem = divmod(s, 3600); m, sec = divmod(rem, 60)
-        if h: return f"{h}h{m:02d}m{sec:02d}s"
-        if m: return f"{m}m{sec:02d}s"
-        return f"{sec}s"
-
-    def _fallback_write(self, s: str) -> None:
-        pad = " " * max(0, self._last_line_len - len(s))
-        sys.stderr.write("\r" + s + pad); sys.stderr.flush()
-        self._last_line_len = len(s)
-
-    def step(self, n: int = 1) -> None:
-        self.done += n
-        if self._tqdm is not None:
-            self._tqdm.update(n); return
-        elapsed = time.time() - self.start
-        rate = self.done / elapsed if elapsed > 0 else 0.0
-        remain = (self.total - self.done) / rate if rate > 0 else 0.0
-        pct = 100.0 * self.done / self.total if self.total else 100.0
-        self._fallback_write(
-            f"[progress] {self.label}: {self.done}/{self.total} "
-            f"({pct:5.1f}%)  elapsed={self._fmt_dt(elapsed)}  "
-            f"eta={self._fmt_dt(remain)}  rate={rate:.2f} req/s")
-
-    def close(self) -> None:
-        if self._tqdm is not None:
-            self._tqdm.close(); self._tqdm = None
-        elif self._last_line_len:
-            sys.stderr.write("\n"); sys.stderr.flush()
-            self._last_line_len = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -180,10 +190,10 @@ class _ProgressReporter:
 # assert _PTP_TAIL in PLANNER_INSTRUCTION_PTP, "prompt-tail surgery failed"
 
 # Adapted from TravelPlanner+ (Table 9)
-PLANNER_INSTRUCTION_PTP = """You are a proficient planner with a keen understanding of personal preferences and styles. Based on the provided information, user profile, and query, please give me a detailed and personalized plan, including specifics such as flight numbers (e.g., F0123456), restaurant names, and accommodation . Note that all the information in your plan should be derived from the provided data and aligned with the profile details. You must adhere to the format given in the example. Additionally, all details should align with common sense. The symbol '-' indicates that information is unnecessary. For example, in the provided sample, you do not need to plan after returning to the departure city. When you travel to two cities in one day, you should note it in the 'Current City' section as in the example (i.e., from A to B). Always prioritize the query constraints first, especially when they conflict with user profiles. Incorporate personal preferences based on user profiles as secondary considerations.
+PLANNER_INSTRUCTION_PTP = """You are a proficient planner with a keen understanding of personal preferences and styles. Based on the provided information, user profile, and query, please give me a detailed and personalized plan, including specifics such as flight numbers (e.g., F0123456), restaurant names, and accommodation names. Note that all the information in your plan should be derived from the provided data and aligned with the profile details. You must adhere to the format given in the example. Additionally, all details should align with commonsense. The symbol '-' indicates that information is unnecessary. For example, in the provided sample, you do not need to plan after returning to the departure city. When you travel to two cities in one day, you should note it in the 'Current City' section as in the example (i.e., from A to B). Always prioritize the query constraints first, especially when they conflict with user profiles. Incorporate personal preferences based on user profiles as secondary considerations.
 
 ***** Example *****
-Query: Could you create a travel plan for 7 people from Ithaca to Charlotte spanning 3 days, from March 8th to March 10th, 2025, with a budget of $30,200?
+Query: Could you create a travel plan for 7 people from Ithaca to Charlotte spanning 3 days, from March 8th to March 10th, 2025, with a budget of $30,200? We would ideally like to visit a nature and parks attraction at least once during the trip. 
 Travel Plan:
 Day 1:
 Current City: from Ithaca to Charlotte
@@ -289,317 +299,6 @@ def build_plan_prompt(record) -> str:
     return PLANNER_INSTRUCTION_PTP.format(text=text, profile=profile, query=query)
 
 
-# --------------------------------------------------------------------------- #
-# Backends                                                                    #
-# --------------------------------------------------------------------------- #
-class Backend:
-    """Abstract base. ``generate_batch`` returns one text per prompt.
-
-    ``on_result`` is an optional per-completion callback: as soon as a
-    single prompt finishes, backends invoke it with ``(index, text)``
-    so the caller can persist the result to disk immediately, which
-    makes Ctrl-C interruptions non-destructive.
-    """
-    name: str = "abstract"
-    def generate_batch(self, prompts: list[str], *, max_tokens: int,
-                       on_result=None) -> list[str]:
-        raise NotImplementedError
-
-
-class AnthropicBackend(Backend):
-    name = "anthropic"
-    def __init__(self, model: str, workers: int = 8):
-        import anthropic
-        # Disable SDK's silent internal retries so ``_one`` handles 429s
-        # visibly; per-request timeout cap keeps stuck sockets from
-        # freezing a worker.
-        self.client = anthropic.Anthropic(max_retries=0, timeout=120.0)
-        self.model = model
-        self.workers = workers
-
-    def _one(self, prompt: str, max_tokens: int) -> str:
-        """Single Anthropic call with EXPLICIT rate-limit handling.
-
-        The default Anthropic SDK retries 429s internally with silent
-        exponential backoff -- which looks like the process 'stalled'
-        for tens of seconds with no output.  We surface the wait
-        directly by catching RateLimitError, parsing the ``retry-after``
-        header when available, logging to stderr so the user knows why
-        the progress bar isn't moving, and retrying.
-        """
-        import re as _re, time as _time, sys as _sys, random as _random
-        from anthropic import RateLimitError, APITimeoutError, APIConnectionError
-
-        max_attempts = 8
-        for attempt in range(max_attempts):
-            try:
-                msg = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=TEMPERATURE,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return "".join(b.text for b in msg.content
-                               if getattr(b, "type", None) == "text").strip()
-            except RateLimitError as e:
-                retry_after = None
-                resp = getattr(e, "response", None)
-                if resp is not None and hasattr(resp, "headers"):
-                    try:
-                        retry_after = float(resp.headers.get("retry-after") or 0)
-                    except (TypeError, ValueError):
-                        retry_after = None
-                wait = retry_after if retry_after else min(60.0, 2 ** attempt)
-                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
-                print(f"\n[rate-limit] anthropic 429   sleeping {wait:.2f}s "
-                      f"(attempt {attempt+1}/{max_attempts})",
-                      file=_sys.stderr, flush=True)
-                _time.sleep(wait)
-                continue
-            except (APITimeoutError, APIConnectionError) as e:
-                wait = min(30.0, 2 ** attempt)
-                print(f"\n[api-transient] {type(e).__name__}: "
-                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
-                      file=_sys.stderr, flush=True)
-                _time.sleep(wait)
-                continue
-        print(f"\n[error] Anthropic call failed after {max_attempts} attempts; skipping.",
-              file=_sys.stderr, flush=True)
-        return ""
-
-    def generate_batch(self, prompts, *, max_tokens, on_result=None):
-        results = [None] * len(prompts)
-        reporter = _ProgressReporter(len(prompts),
-                                     label=f"anthropic ({self.workers}w)")
-        import sys as _sys
-        _first_error_logged = False
-        try:
-            with ThreadPoolExecutor(max_workers=self.workers) as ex:
-                futs = {ex.submit(self._one, p, max_tokens): i
-                        for i, p in enumerate(prompts)}
-                for f in as_completed(futs):
-                    idx = futs[f]
-                    try:
-                        text = f.result()
-                    except Exception as e:
-                        if not _first_error_logged:
-                            print(f"\n[error] worker {idx} raised {type(e).__name__}: {e}",
-                                  file=_sys.stderr, flush=True)
-                            _first_error_logged = True
-                        text = ""
-                    results[idx] = text
-                    if on_result is not None and text:
-                        try:
-                            on_result(idx, text)
-                        except Exception:
-                            pass
-                    reporter.step()
-        finally:
-            reporter.close()
-        return results
-
-
-class OpenAIBackend(Backend):
-    name = "openai"
-    def __init__(self, model: str, workers: int = 8,
-                 base_url: str | None = None, api_key: str | None = None):
-        from openai import OpenAI
-        kwargs: dict = {}
-        if base_url is not None: kwargs["base_url"] = base_url
-        if api_key  is not None: kwargs["api_key"]  = api_key
-        # Disable the SDK's silent internal retry so ``_one`` handles
-        # 429s visibly.  Cap per-request timeout so stuck connections
-        # can't freeze a worker forever.
-        kwargs["max_retries"] = 0
-        kwargs["timeout"] = 120.0
-        self.client = OpenAI(**kwargs)
-        self.model = model
-        self.workers = workers
-
-    def _one(self, prompt: str, max_tokens: int) -> str:
-        """Single OpenAI call with EXPLICIT rate-limit handling.
-
-        See AnthropicBackend._one for the rationale -- OpenAI's SDK
-        also retries 429s silently under the hood, which mimics a
-        hang from the caller's point of view.  We surface it.
-        """
-        import re as _re, time as _time, sys as _sys, random as _random
-        from openai import RateLimitError, APITimeoutError, APIConnectionError
-
-        max_attempts = 8
-        for attempt in range(max_attempts):
-            try:
-                # GPT-5-family reasoning models: `temperature` MUST be
-                # the default (1); passing anything else raises
-                # unsupported_value.  Omit it entirely so the SDK uses
-                # the default.  Reasoning knobs + json_object response
-                # format are supported.  See PLANNER_INSTRUCTION_PTP
-                # which instructs the model to return a JSON object.
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_completion_tokens=max_tokens,
-                    reasoning_effort="none", #"medium",
-                    verbosity="medium",
-                    # response_format={"type": "json_object"},
-                )
-                choice = resp.choices[0]
-                content = (choice.message.content or "").strip()
-                # Empty content on GPT-5-family means the reasoning
-                # tokens ate the budget (finish_reason = "length") or
-                # the API refused (finish_reason = "content_filter" /
-                # other).  Log the diagnostic ONCE per retry so
-                # silent-empty-writes don't look like a hang.
-                if not content:
-                    fr = getattr(choice, "finish_reason", None)
-                    usage = getattr(resp, "usage", None)
-                    reasoning_tok = None
-                    if usage is not None:
-                        details = getattr(usage, "completion_tokens_details", None)
-                        if details is not None:
-                            reasoning_tok = getattr(details, "reasoning_tokens", None)
-                    print(f"\n[empty] finish_reason={fr!r}  "
-                          f"completion_tokens={getattr(usage,'completion_tokens',None)}  "
-                          f"reasoning_tokens={reasoning_tok}  "
-                          f"max_completion_tokens={max_tokens}"
-                          f"   -> raise max_completion_tokens or drop reasoning_effort to 'low'",
-                          file=_sys.stderr, flush=True)
-                return content
-            except RateLimitError as e:
-                msg = str(getattr(e, "message", e))
-                m = _re.search(r"try again in\s+([\d.]+)\s*(ms|s|m)", msg)
-                if m:
-                    v = float(m.group(1)); unit = m.group(2)
-                    wait = v/1000.0 if unit == "ms" else (v*60.0 if unit == "m" else v)
-                else:
-                    wait = min(60.0, 2 ** attempt)
-                wait = max(wait, 0.5) + _random.uniform(0.0, 0.5)
-                # Trim the (typically-long) SDK message down to essentials.
-                lim = _re.search(r"Limit\s+(\d+)", msg)
-                usd = _re.search(r"Used\s+(\d+)", msg)
-                req = _re.search(r"Requested\s+(\d+)", msg)
-                brief = (f"limit={lim.group(1) if lim else '?'} "
-                         f"used={usd.group(1) if usd else '?'} "
-                         f"req={req.group(1) if req else '?'}"
-                         if (lim or usd or req) else msg[:80])
-                print(f"\n[rate-limit] {brief}   sleeping {wait:.2f}s "
-                      f"(attempt {attempt+1}/{max_attempts})",
-                      file=_sys.stderr, flush=True)
-                _time.sleep(wait)
-                continue
-            except (APITimeoutError, APIConnectionError) as e:
-                wait = min(30.0, 2 ** attempt)
-                print(f"\n[api-transient] {type(e).__name__}: "
-                      f"retrying in {wait:.1f}s (attempt {attempt+1}/{max_attempts})",
-                      file=_sys.stderr, flush=True)
-                _time.sleep(wait)
-                continue
-        print(f"\n[error] OpenAI call failed after {max_attempts} attempts; skipping.",
-              file=_sys.stderr, flush=True)
-        return ""
-
-    def generate_batch(self, prompts, *, max_tokens, on_result=None):
-        results = [None] * len(prompts)
-        reporter = _ProgressReporter(len(prompts),
-                                     label=f"openai ({self.workers}w)")
-        import sys as _sys
-        _first_error_logged = False
-        try:
-            with ThreadPoolExecutor(max_workers=self.workers) as ex:
-                futs = {ex.submit(self._one, p, max_tokens): i
-                        for i, p in enumerate(prompts)}
-                for f in as_completed(futs):
-                    idx = futs[f]
-                    try:
-                        text = f.result()
-                    except Exception as e:
-                        # Surface the FIRST unexpected exception so silent
-                        # cache-writes-not-happening doesn't look like a hang.
-                        # (RateLimit / Timeout / ConnectionError are handled
-                        # inside _one with visible logs; anything reaching
-                        # here is an unexpected error worth calling out --
-                        # e.g., BadRequestError on unsupported params.)
-                        if not _first_error_logged:
-                            print(f"\n[error] worker {idx} raised {type(e).__name__}: {e}",
-                                  file=_sys.stderr, flush=True)
-                            _first_error_logged = True
-                        text = ""
-                    results[idx] = text
-                    if on_result is not None and text:
-                        try:
-                            on_result(idx, text)
-                        except Exception:
-                            pass
-                    reporter.step()
-        finally:
-            reporter.close()
-        return results
-
-
-class VLLMOfflineBackend(Backend):
-    name = "vllm-offline"
-    def __init__(self, model: str, *,
-                 gpu_memory_utilization: float = 0.9,
-                 max_model_len: int | None = None,
-                 dtype: str = "auto",
-                 tensor_parallel_size: int = 1,
-                 trust_remote_code: bool = True,
-                 **extra):
-        from vllm import LLM
-        self.LLM_class = LLM
-        self.model = model
-        self.llm = LLM(
-            model=model,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            dtype=dtype,
-            tensor_parallel_size=tensor_parallel_size,
-            trust_remote_code=trust_remote_code,
-            **extra,
-        )
-
-    def generate_batch(self, prompts, *, max_tokens, on_result=None):
-        from vllm import SamplingParams
-        sp = SamplingParams(temperature=TEMPERATURE, max_tokens=max_tokens)
-        conversations = [[{"role": "user", "content": p}] for p in prompts]
-        outputs = self.llm.chat(conversations, sampling_params=sp, use_tqdm=True)
-        texts = [o.outputs[0].text.strip() for o in outputs]
-        # vLLM's internal batching is opaque; the best we can do here
-        # is fire on_result after the whole batch completes so every
-        # completed plan lands in the cache before the run's end (and
-        # merge / write_output_jsonl) is invoked.
-        if on_result is not None:
-            for i, t in enumerate(texts):
-                if t:
-                    try:
-                        on_result(i, t)
-                    except Exception:
-                        pass
-        return texts
-
-
-def make_backend(name: str, model: str, *,
-                 workers: int = 8,
-                 openai_base_url: str | None = None,
-                 openai_api_key: str | None = None,
-                 vllm_gpu_memory: float = 0.9,
-                 vllm_max_model_len: int | None = None,
-                 vllm_dtype: str = "auto",
-                 vllm_tensor_parallel: int = 1) -> Backend:
-    if name == "anthropic":
-        return AnthropicBackend(model=model, workers=workers)
-    if name == "openai":
-        return OpenAIBackend(model=model, workers=workers,
-                             base_url=openai_base_url, api_key=openai_api_key)
-    if name == "vllm-offline":
-        return VLLMOfflineBackend(
-            model=model,
-            gpu_memory_utilization=vllm_gpu_memory,
-            max_model_len=vllm_max_model_len,
-            dtype=vllm_dtype,
-            tensor_parallel_size=vllm_tensor_parallel,
-        )
-    raise SystemExit(f"unknown backend: {name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -626,10 +325,20 @@ def load_hf_dataset(dataset: str, split: str, config: str | None,
 # --------------------------------------------------------------------------- #
 # Cache + orchestration                                                       #
 # --------------------------------------------------------------------------- #
-def _load_cache(cache_path: Path) -> dict[int, str]:
-    cache: dict[int, str] = {}
+def _load_cache(cache_path: Path) -> dict[int, dict[str, Any]]:
+    """Read the per-model plan cache, keyed by the HF dataset ``id``
+    (1-indexed).  Each entry value is
+    ``{content, reasoning, source_id}``.  ``source_id`` is an integer
+    on ``test``-split caches (pointer into ``test_large``) and ``None``
+    on ``test_large``-split caches.
+
+    Legacy files keyed by ``idx`` (0-indexed positional) are REJECTED
+    with a clear error pointing to the one-off migration script.
+    """
+    cache: dict[int, dict[str, Any]] = {}
     if not cache_path.exists():
         return cache
+    saw_legacy = False
     with cache_path.open() as f:
         for line in f:
             line = line.strip()
@@ -637,25 +346,152 @@ def _load_cache(cache_path: Path) -> dict[int, str]:
                 continue
             try:
                 e = json.loads(line)
-                cache[int(e["idx"])] = e["text"]
             except Exception:
                 continue
+            if "id" not in e and "idx" in e:
+                saw_legacy = True
+                continue
+            try:
+                id_ = int(e["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            content   = e.get("content")
+            if content is None:
+                content = e.get("text", "")
+            reasoning = e.get("reasoning")
+            sid = e.get("source_id")
+            cache[id_] = {"content": content, "reasoning": reasoning,
+                          "source_id": sid}
+    if saw_legacy:
+        raise SystemExit(
+            f"[cache] {cache_path} contains legacy 'idx'-keyed entries.\n"
+            f"        Run `python3 plan-generation/migrate_legacy_cache.py "
+            f"{cache_path}` first (uses the HF split to map every legacy "
+            f"idx to its id / source_id)."
+        )
     return cache
 
 
-def _append_cache(cache_path: Path, idx: int, text: str) -> None:
-    # Append + flush + fsync so a Ctrl-C or a killed request leaves every
-    # already-completed plan safely on disk instead of stuck in Python's
-    # default buffer.
+def _append_cache(cache_path: Path, id_: int, source_id: int | None,
+                  content: str, reasoning: str | None = None) -> None:
+    """Append one completion to the cache with fsync.
+
+    Entry shape: ``{"id": <int>, "source_id": <int|null>,
+    "content": <str>, "reasoning": <str|null>}`` -- ``id`` is the
+    HF dataset ``id`` (1-indexed); ``source_id`` is the ``test`` row's
+    pointer into ``test_large`` (``null`` on ``test_large`` caches).
+    """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("a") as f:
-        f.write(json.dumps({"idx": idx, "text": text}) + "\n")
+        f.write(json.dumps({
+            "id":        id_,
+            "source_id": source_id,
+            "content":   content,
+            "reasoning": reasoning,
+        }) + "\n")
         f.flush()
         try:
             import os as _os
             _os.fsync(f.fileno())
         except OSError:
             pass
+
+
+def promote_seed_into_cache(seed_path: Path, cache_path: Path,
+                            target_rows: list[tuple[int, int | None, dict]],
+                            *, verbose: bool = True) -> int:
+    """Merge a seed cache from the OTHER split into ``cache_path``.
+
+    Direction is inferred from ``target_rows`` (i.e. from ``--split``):
+
+      * If the target split carries ``source_id`` (values are integers)
+        -- this is ``test`` -- and the seed was produced against
+        ``test_large`` (its entries have ``source_id`` null), then for
+        each target row whose ``source_id`` matches a seed entry's
+        ``id``, the seed content is appended to ``cache_path`` under
+        the target row's ``id`` (with ``source_id`` set to the seed
+        entry's id, i.e. the ``test_large`` id).
+
+      * If the target split has ``source_id`` null on every row -- this
+        is ``test_large`` -- and the seed was produced against ``test``
+        (its entries carry a non-null ``source_id``), then each seed
+        entry's ``source_id`` becomes the new ``id`` in the appended
+        entry (with ``source_id`` set to null).  Seed entries with a
+        ``source_id`` that isn't a valid ``id`` in the target split
+        are skipped.
+
+    Primary-cache entries win on any id collision -- the seed is only
+    used to fill gaps.  The seed file is left untouched; promoted
+    entries are appended to ``cache_path`` and become part of the
+    normal cache going forward.
+    """
+    if not seed_path.exists():
+        raise SystemExit(f"[seed-cache] {seed_path} does not exist")
+    seed = _load_cache(seed_path)
+    if verbose:
+        print(f"[seed-cache] seed:    {seed_path}  ({len(seed)} entries)")
+        print(f"[seed-cache] target:  {cache_path}")
+
+    primary = _load_cache(cache_path)
+
+    target_source_ids = {sid for (_i, sid, _r) in target_rows}
+    target_source_ids.discard(None)
+    target_expects_sid = bool(target_source_ids)
+
+    seed_has_sid = any(v.get("source_id") is not None for v in seed.values())
+
+    if target_expects_sid and seed_has_sid:
+        raise SystemExit(
+            "[seed-cache] both target split and seed carry non-null "
+            "source_id; nothing to promote.  Point --seed-cache at a "
+            "cache from the OTHER split."
+        )
+    if not target_expects_sid and not seed_has_sid:
+        raise SystemExit(
+            "[seed-cache] both target split and seed have null "
+            "source_id; nothing to promote.  Point --seed-cache at a "
+            "cache from the OTHER split."
+        )
+
+    n_promoted = n_skipped = 0
+    if target_expects_sid:
+        # target = test, seed = test_large.  For each target row whose
+        # source_id equals a seed entry's id, promote that seed entry
+        # to the target id (test id).
+        seed_ids = set(seed.keys())
+        for tid, tsid, _r in target_rows:
+            if tid in primary:
+                continue
+            if tsid is None or tsid not in seed_ids:
+                continue
+            entry = seed[tsid]
+            _append_cache(cache_path, tid, tsid,
+                          entry.get("content", ""),
+                          reasoning=entry.get("reasoning"))
+            n_promoted += 1
+    else:
+        # target = test_large, seed = test.  For each seed entry, its
+        # source_id (test_large id) becomes the new id.
+        valid_target_ids = {i for (i, _s, _r) in target_rows}
+        for seed_id, entry in seed.items():
+            new_id = entry.get("source_id")
+            if new_id is None:
+                n_skipped += 1
+                continue
+            if new_id in primary:
+                continue
+            if new_id not in valid_target_ids:
+                n_skipped += 1
+                continue
+            _append_cache(cache_path, new_id, None,
+                          entry.get("content", ""),
+                          reasoning=entry.get("reasoning"))
+            n_promoted += 1
+    if verbose:
+        extra = f", skipped={n_skipped}" if n_skipped else ""
+        print(f"[seed-cache] promoted {n_promoted} entries into {cache_path}"
+              f"{extra}")
+    return n_promoted
 
 
 def _parse_index_list(spec: str) -> set[int]:
@@ -689,7 +525,7 @@ def _default_cache_path(backend_name: str, model: str) -> Path:
     return PLAN_DIR / f"plan_cache_{backend_name}_{_sanitize_model(model)}.jsonl"
 
 
-def generate_all(rows: list[tuple[int, dict]], backend: Backend, *,
+def generate_all(rows: list[tuple[int, int | None, dict]], backend: Backend, *,
                  cache_path: Path, max_tokens: int = 4096,
                  verbose: bool = True) -> None:
     cache = _load_cache(cache_path)
@@ -697,11 +533,13 @@ def generate_all(rows: list[tuple[int, dict]], backend: Backend, *,
         print(f"[cache] file: {cache_path}")
         print(f"[cache] plans cached: {len(cache)}")
 
-    pending: list[tuple[int, str]] = []
-    for idx, r in rows:
-        if idx in cache:
+    # Each pending entry carries (id, source_id, prompt) so ``_persist``
+    # can write both id and source_id back into the cache line.
+    pending: list[tuple[int, int | None, str]] = []
+    for id_, sid, r in rows:
+        if id_ in cache:
             continue
-        pending.append((idx, build_plan_prompt(r)))
+        pending.append((id_, sid, build_plan_prompt(r)))
 
     if verbose:
         print(f"[run] backend={backend.name}  pending={len(pending)}  "
@@ -709,22 +547,25 @@ def generate_all(rows: list[tuple[int, dict]], backend: Backend, *,
     if not pending:
         return
 
-    prompts = [p for (_, p) in pending]
+    prompts = [p for (_, _, p) in pending]
 
     # Serialize cache writes across worker threads so appends can't
     # interleave partial JSON lines on disk.
     import threading
     _cache_lock = threading.Lock()
 
-    def _persist(local_index: int, text: str) -> None:
+    def _persist(local_index: int, comp: dict[str, Any]) -> None:
         """Called from the backend as soon as prompt ``local_index``
-        finishes.  Look up the pending row's real row-index and append
+        finishes.  Look up the pending row's (id, source_id) and append
         immediately -- so any Ctrl-C partway through leaves every
-        completed plan on disk instead of only after the batch ends.
+        completed plan (and its reasoning trace, when the model
+        exposed one) on disk instead of only after the batch ends.
         """
-        row_idx, _ = pending[local_index]
+        row_id, row_sid, _ = pending[local_index]
         with _cache_lock:
-            _append_cache(cache_path, row_idx, text)
+            _append_cache(cache_path, row_id, row_sid,
+                           comp.get("content", ""),
+                           reasoning=comp.get("reasoning"))
 
     t0 = time.time()
     if verbose:
@@ -743,34 +584,60 @@ def generate_all(rows: list[tuple[int, dict]], backend: Backend, *,
               f"({len(texts)/max(dt, 1e-6):.2f} plans/sec)")
 
 
-def write_output_jsonl(rows: list[tuple[int, dict]], out_path: Path, *,
+def write_output_jsonl(rows: list[tuple[int, int | None, dict]], out_path: Path, *,
                        cache_path: Path) -> None:
-    """Emit a JSONL with `{idx, profile, query, reference_information,
-    llm_travel_plan}` for every row whose plan is now in the cache.
+    """Emit a JSONL with ``{id, source_id, profile, query,
+    reference_information, llm_travel_plan, llm_reasoning}`` for every
+    row whose plan is present in the cache.
+
+    The file mirrors the cache: rows without a cached plan are NOT
+    emitted (they would show up as ``llm_travel_plan=None`` padding and
+    make id-based evaluation confusing).  ``id`` is the HF dataset id
+    (1-indexed); ``source_id`` is an integer on ``test``-split rows
+    (pointer into ``test_large``) and ``null`` on ``test_large`` rows,
+    so evaluators can match records back to either split directly.
+
+    Emission order is ascending ``id`` -- independent of dispatch
+    order, so re-runs are byte-stable modulo new cache entries.
 
     Under json_object response mode (default for the OpenAI backend), the
-    cached text is a JSON envelope like ``{"travel_plan": "..."}``; here
-    we extract the inner string so ``llm_travel_plan`` stays the same
-    line-based text the downstream TravelPlanner evaluator expects.
+    cached content is a JSON envelope like ``{"travel_plan": "..."}``;
+    here we extract the inner string so ``llm_travel_plan`` stays the
+    same line-based text the downstream TravelPlanner evaluator expects.
     Non-JSON cached plans (e.g. Anthropic / vLLM backends that don't
-    use response_format) pass through unchanged."""
+    use response_format) pass through unchanged.
+
+    ``llm_reasoning`` carries the model's reasoning trace when the
+    backend surfaced one (OpenRouter's ``message.reasoning``, vLLM's
+    ``reasoning_content`` or extracted ``<think>...</think>`` blocks,
+    Anthropic's ``thinking`` content blocks) -- ``None`` otherwise."""
     cache = _load_cache(cache_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Ascending id keeps the file stable across partial re-runs.
+    cached_rows = sorted(
+        ((id_, sid, r) for (id_, sid, r) in rows if id_ in cache),
+        key=lambda t: t[0],
+    )
     n = 0
     with out_path.open("w") as f:
-        for idx, r in rows:
-            plan = _extract_plan_text(cache.get(idx))
+        for id_, sid, r in cached_rows:
+            entry     = cache[id_]
+            plan      = _extract_plan_text(entry.get("content"))
+            reasoning = entry.get("reasoning")
             rec = {
-                "idx":                   idx,
+                "id":                    id_,
+                "source_id":             sid,
                 "profile":               r["profile"],
                 "query":                 r["query"],
                 "reference_information": r["reference_information"],
                 "llm_travel_plan":       plan,
+                "llm_reasoning":         reasoning,
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if plan:
                 n += 1
-    print(f"[out] wrote {n} records with plans (of {len(rows)} total) → {out_path}")
+    total = len(cached_rows)
+    print(f"[out] wrote {total} records ({n} with plans, {total - n} cached-but-empty) → {out_path}")
 
 
 def _extract_plan_text(raw: str | None) -> str | None:
@@ -802,11 +669,17 @@ def main():
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--backend", choices=["anthropic", "openai", "vllm-offline"],
+    ap.add_argument("--backend",
+                    choices=["anthropic", "openai", "openrouter", "vllm-offline"],
                     default=os.environ.get("LLM_PLAN_BACKEND", "anthropic"))
     ap.add_argument("--model", default=None,
-                    help="Model name.  Defaults: anthropic→claude-haiku-4-5-20251001, "
-                         "openai→gpt-5.4-mini, vllm-offline→meta-llama/Llama-3.1-8B-Instruct")
+                    help="Model name.  Defaults: "
+                         "anthropic→claude-haiku-4-5-20251001, "
+                         "openai→gpt-5.4-mini, "
+                         "openrouter→openai/gpt-5.4-mini "
+                         "(use OpenRouter's provider/model form, e.g. "
+                         "anthropic/claude-3.5-sonnet, meta-llama/llama-3.3-70b-instruct), "
+                         "vllm-offline→meta-llama/Llama-3.1-8B-Instruct")
     ap.add_argument("--workers", type=int, default=4)
     # `max_completion_tokens` for reasoning models includes hidden
     # chain-of-thought tokens.  A 3-7 day plan needs ~500-1500 output
@@ -815,6 +688,30 @@ def main():
     # (e.g. 8192) if you switch to `reasoning_effort='low'` / 'minimal'
     # in the backend for cost / speed.
     ap.add_argument("--max-tokens", type=int, default=4096)
+    # Sampling temperature.  Default None means "use the module-level
+    # TEMPERATURE constant" (0.2) -- the value every result in the
+    # paper was generated at -- so omitting the flag reproduces prior
+    # runs exactly.  Applied by anthropic (non-thinking mode only),
+    # openrouter (via _sampling_kwargs, skipped for reasoning models
+    # which mandate the default) and vllm-offline.  On the `openai`
+    # backend the field is omitted unless you pass this flag, because
+    # the GPT-5 family rejects any non-default temperature; set it only
+    # when pointing that backend at an OpenAI-compatible local server.
+    ap.add_argument("--temperature", type=float, default=None,
+                    help=f"Sampling temperature (default: {TEMPERATURE}).  "
+                         "Ignored for reasoning models, which require "
+                         "the provider default.")
+    # Per-request wall-clock cap handed to the SDK client.  Both the
+    # anthropic and openai/openrouter clients run with max_retries=0,
+    # so a timeout means the whole generation is thrown away and redone
+    # -- expensive on a local server where a long trace plus a 7-day
+    # plan can legitimately exceed 120s under a deep request queue.
+    ap.add_argument("--request-timeout", type=float, default=120.0,
+                    help="Per-request timeout in seconds for the "
+                         "anthropic / openai / openrouter HTTP clients "
+                         "(default: 120).  Raise it when serving a "
+                         "large model locally.  No effect on "
+                         "vllm-offline, which makes no HTTP calls.")
 
     # HF dataset selection.
     ap.add_argument("--dataset", default=DEFAULT_DATASET,
@@ -832,9 +729,12 @@ def main():
     # Row selection.
     ap.add_argument("--sample", type=int, default=0,
                     help="If >0, only generate for the first N rows (smoke test).")
-    ap.add_argument("--sample-idx", type=str, default=None,
-                    help="Comma-list of dataset row indices, or path to a file "
-                         "with one index per line.")
+    ap.add_argument("--sample-id", "--sample-idx", dest="sample_id",
+                    type=str, default=None,
+                    help="Comma-list of dataset ids (1-indexed), or path to a "
+                         "file with one id per line.  --sample-idx is accepted "
+                         "as a legacy alias and refers to the same 1-indexed "
+                         "dataset id field.")
 
     # Output + cache.
     ap.add_argument("--out", default=None,
@@ -842,14 +742,107 @@ def main():
                          "plans_<backend>_<model-sanitized>.jsonl.")
     ap.add_argument("--cache", default=None,
                     help="Sidecar cache JSONL (append-only, keyed by dataset "
-                         "row index).  Default: plan-generation/"
+                         "id).  Default: plan-generation/"
                          "plan_cache_<backend>_<model-sanitized>.jsonl.  "
                          "Different backends / models get separate caches "
                          "so parallel runs never collide.")
+    ap.add_argument("--seed-cache", default=None,
+                    help="Optional path to a cache from the OTHER split.  "
+                         "Promoted entries are appended to --cache before "
+                         "generation begins (direction inferred from --split): "
+                         "test <-> test_large.  Skips re-generation of "
+                         "overlapping rows.")
 
-    # OpenAI-compat + vLLM extras.
+    # OpenAI-compat + OpenRouter + vLLM extras.
     ap.add_argument("--openai-base-url", default=os.environ.get("OPENAI_BASE_URL"))
     ap.add_argument("--openai-api-key",  default=os.environ.get("OPENAI_API_KEY"))
+    ap.add_argument("--openrouter-base-url",
+                    default=os.environ.get("OPENROUTER_BASE_URL"),
+                    help="OpenRouter API base URL (default: "
+                         "https://openrouter.ai/api/v1).")
+    ap.add_argument("--openrouter-api-key",
+                    default=os.environ.get("OPENROUTER_API_KEY"),
+                    help="OpenRouter API key (defaults to $OPENROUTER_API_KEY).")
+    # Free-form request-body passthrough for OpenAI-compatible servers
+    # whose schema is a SUPERSET of OpenAI's.  The motivating case is a
+    # self-hosted vLLM online server, which accepts `chat_template_kwargs`
+    # (the only way to toggle Qwen3-style thinking per request) plus
+    # sampling knobs the OpenAI SDK has no named parameter for -- top_k,
+    # min_p, repetition_penalty, skip_special_tokens.  Ignored-with-a-
+    # warning by servers that don't declare the keys; NOT safe to point
+    # at api.openai.com, which rejects unknown body fields outright.
+    ap.add_argument("--extra-body", default=os.environ.get("LLM_PLAN_EXTRA_BODY"),
+                    help="JSON object merged into the request body on "
+                         "every call (openai / openrouter backends).  "
+                         "For a vLLM server, e.g. "
+                         "'{\"chat_template_kwargs\": {\"enable_thinking\": true}}' "
+                         "or '{\"top_k\": 20, \"min_p\": 0.0}'.  Keys "
+                         "override the backend's own defaults, so "
+                         "'{\"include_reasoning\": false}' turns the "
+                         "reasoning trace off.")
+    # Reasoning-model knobs.  Applied by the OPENAI and OPENROUTER
+    # backends.  Useful when routing e.g. `openai/gpt-5.4-mini` at
+    # reduced effort for cheaper runs, or forcing `high` on a hard
+    # subset.  Ignored by anthropic / vllm-offline backends.
+    #
+    # OpenAI backend: unset -> constructor default (see OpenAIBackend
+    # ``__init__``); set -> passed directly to the API on every call.
+    # OpenRouter backend: unset -> per-model default from
+    # ``_sampling_kwargs`` (medium for gpt-5 / o-series, unset for
+    # non-reasoning models); set -> added / overridden on every call.
+    ap.add_argument("--reasoning-effort",
+                    choices=["none", "minimal", "low", "medium",
+                             "high", "xhigh"],
+                    default=None,
+                    help="Reasoning effort knob for the openai and "
+                         "openrouter backends.  Default None uses the "
+                         "backend's own default (see OpenAIBackend "
+                         "constructor / _sampling_kwargs).")
+    ap.add_argument("--verbosity",
+                    choices=["low", "medium", "high"],
+                    default=None,
+                    help="Verbosity knob for the openai and openrouter "
+                         "backends.  Default None uses the backend's "
+                         "own default.")
+    # Endpoint switch for the OpenAI backend.  ``responses`` (default)
+    # routes through the Responses API, which is the endpoint OpenAI
+    # documents as the primary path for reasoning models and which
+    # returns reasoning-summary items on every call (captured on the
+    # ``llm_reasoning`` output field).  Pass ``chat_completions`` to
+    # opt back into the older Chat Completions path -- content only,
+    # no reasoning trace surfaced.  Ignored by every other backend.
+    ap.add_argument("--openai-endpoint",
+                    choices=list(_OPENAI_ENDPOINTS),
+                    default="responses",
+                    help="OpenAI endpoint to route through.  Default "
+                         "`responses` uses the Responses API and "
+                         "captures reasoning summaries.  Pass "
+                         "`chat_completions` to force the older "
+                         "endpoint (content only, no reasoning trace).")
+    ap.add_argument("--openai-reasoning-summary",
+                    choices=["auto", "concise", "detailed"],
+                    default="auto",
+                    help="Reasoning-summary verbosity for the Responses "
+                         "API (see the OpenAI reasoning guide -- "
+                         "https://platform.openai.com/docs/guides/reasoning "
+                         "-- for details).  `auto` lets the model pick; "
+                         "`concise` returns a brief summary; `detailed` "
+                         "returns a longer one.  Ignored under "
+                         "--openai-endpoint chat_completions.  Default `auto`.")
+    # Anthropic extended-thinking budget.  0 (default) keeps thinking
+    # disabled -- Anthropic behaves as before, content only.  A positive
+    # value enables thinking mode with that many tokens of budget; the
+    # backend passes ``thinking={"type":"enabled","budget_tokens":N}``
+    # and content-block-level ``thinking`` blocks are captured on the
+    # ``llm_reasoning`` field.  Recommended range: 1024-16384.
+    ap.add_argument("--anthropic-thinking-budget",
+                    type=int, default=0,
+                    help="Budget tokens for Anthropic extended thinking.  "
+                         "0 (default) disables thinking mode.  A positive "
+                         "value enables it; reasoning trace lands on the "
+                         "`llm_reasoning` output field.  When enabled, "
+                         "the effective max_tokens is bumped to "
+                         "budget + 1024 as required by the API.")
     ap.add_argument("--vllm-gpu-memory", type=float, default=0.9)
     ap.add_argument("--vllm-max-model-len", type=int, default=None)
     ap.add_argument("--vllm-dtype", default="auto")
@@ -857,9 +850,24 @@ def main():
 
     args = ap.parse_args()
 
+    # Validate --extra-body FIRST: a typo in the JSON should abort
+    # before the dataset download, not surface as a confusing 400
+    # midway through a run that has already burned tokens.
+    extra_body: dict | None = None
+    if args.extra_body:
+        try:
+            extra_body = json.loads(args.extra_body)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--extra-body is not valid JSON: {e}")
+        if not isinstance(extra_body, dict):
+            raise SystemExit(
+                f"--extra-body must be a JSON object, got "
+                f"{type(extra_body).__name__}")
+
     default_model = {
         "anthropic":    "claude-haiku-4-5-20251001",
         "openai":       "gpt-5.4-mini",
+        "openrouter":   "openai/gpt-5.4-mini",
         "vllm-offline": "meta-llama/Llama-3.1-8B-Instruct",
     }
     model = args.model or default_model[args.backend]
@@ -867,6 +875,14 @@ def main():
     cache_path = Path(args.cache) if args.cache else _default_cache_path(args.backend, model)
 
     print(f"[cfg] backend={args.backend}  model={model}  workers={args.workers}")
+    # Echo the sampling knobs so a run's provenance is recoverable from
+    # its log alone -- these change results and are easy to forget.
+    print(f"[cfg] temperature="
+          f"{TEMPERATURE if args.temperature is None else args.temperature}"
+          f"{' (default)' if args.temperature is None else ''}"
+          f"  max-tokens={args.max_tokens}"
+          f"  request-timeout={args.request_timeout}s"
+          + (f"  extra-body={json.dumps(extra_body)}" if extra_body else ""))
     print(f"[cfg] dataset={args.dataset}  split={args.split}"
           + (f"  config={args.config}" if args.config else "")
           + f"  private-token={'yes' if args.hf_token else 'no'}")
@@ -879,22 +895,40 @@ def main():
     print(f"[in]  {n_total} rows loaded from HF: {args.dataset}:{args.split}")
     print(f"[in]  columns: {ds.column_names}")
 
-    required = {"profile", "query", "reference_information"}
+    required = {"id", "profile", "query", "reference_information"}
     missing = required - set(ds.column_names)
     if missing:
         sys.exit(f"dataset is missing required columns: {sorted(missing)}")
 
-    # Build (idx, row) list.
-    rows: list[tuple[int, dict]] = [(i, ds[i]) for i in range(n_total)]
+    # Build (id, source_id, row) triples.  ``all_rows`` covers the
+    # ENTIRE dataset and feeds ``write_output_jsonl`` at the end so
+    # the output file stays cumulative across partial re-runs (matching
+    # the cache, which is already append-only + keyed by dataset id).
+    # ``rows`` below is the invocation-scoped filter that drives ONLY
+    # ``generate_all``'s pending-list -- so a run with ``--sample-id
+    # 50,...,149`` dispatches just those 100 prompts while the emitted
+    # plan file still contains previously completed rows.
+    all_rows: list[tuple[int, int | None, dict]] = [
+        (int(ds[i]["id"]),
+         (int(ds[i]["source_id"]) if ds[i].get("source_id") is not None else None),
+         ds[i])
+        for i in range(n_total)
+    ]
+    rows: list[tuple[int, int | None, dict]] = list(all_rows)
 
-    # Row filter.
-    if args.sample_idx:
-        target = _parse_index_list(args.sample_idx)
-        rows = [(i, r) for (i, r) in rows if i in target]
-        print(f"[in]  --sample-idx filter: {len(rows)} rows match")
+    # Row filter (dispatch-only; does not narrow the output).
+    if args.sample_id:
+        target = _parse_index_list(args.sample_id)
+        rows = [(i, s, r) for (i, s, r) in all_rows if i in target]
+        print(f"[in]  --sample-id filter: {len(rows)} rows match")
     elif args.sample > 0:
-        rows = rows[: args.sample]
+        rows = all_rows[: args.sample]
         print(f"[in]  --sample={args.sample}: {len(rows)} rows")
+
+    # Cross-split cache promotion (optional).  Promote BEFORE generation
+    # so the pending-list already accounts for merged entries.
+    if args.seed_cache:
+        promote_seed_into_cache(Path(args.seed_cache), cache_path, all_rows)
 
     # Backend + generate.
     backend = make_backend(
@@ -902,16 +936,30 @@ def main():
         workers=args.workers,
         openai_base_url=args.openai_base_url,
         openai_api_key=args.openai_api_key,
+        openai_endpoint=args.openai_endpoint,
+        openai_reasoning_summary=args.openai_reasoning_summary,
+        openrouter_base_url=args.openrouter_base_url,
+        openrouter_api_key=args.openrouter_api_key,
+        anthropic_thinking_budget=args.anthropic_thinking_budget,
+        reasoning_effort=args.reasoning_effort,
+        verbosity=args.verbosity,
         vllm_gpu_memory=args.vllm_gpu_memory,
         vllm_max_model_len=args.vllm_max_model_len,
         vllm_dtype=args.vllm_dtype,
         vllm_tensor_parallel=args.vllm_tensor_parallel,
+        extra_body=extra_body,
+        temperature=args.temperature,
+        request_timeout=args.request_timeout,
     )
     generate_all(rows, backend, cache_path=cache_path,
                  max_tokens=args.max_tokens)
 
-    # Write output JSONL.
-    write_output_jsonl(rows, out_path, cache_path=cache_path)
+    # Write output JSONL over the FULL dataset (not just the filtered
+    # slice) so partial re-runs accumulate plans in the output file
+    # rather than clobbering earlier runs' entries.  Uncached rows are
+    # still emitted with ``llm_travel_plan=None`` / ``llm_reasoning=None``
+    # so downstream can tell "pending" apart from "generated".
+    write_output_jsonl(all_rows, out_path, cache_path=cache_path)
 
 
 if __name__ == "__main__":

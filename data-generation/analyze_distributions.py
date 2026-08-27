@@ -18,6 +18,17 @@ covering:
   [8]  Feasibility gate results — flight_only_feasible, budget_multiplier
        distribution, per-city floor shortfalls, transport-cap headroom.
   [9]  Per-record templated_nl_profile / templated_nl_query length stats.
+  [10] Paradigm distribution WITHIN COMPETING pairs, split per level.
+  [11] Same, for non_competing and independent (per-level).
+  [12] Compensatory bank_id landing across (competing/nc/indep/single).
+       Plus Compensatory competing pair combos (Comp × partner × level).
+  [13] Lexicographic bank_id landing across buckets, plus Lex competing
+       pair combos.
+  [14] Cross-paradigm competing pair combos (bidirectional).
+
+Also emits ``analysis/summary.txt`` — a concise headline snapshot with
+level splits, competing-share per level, paradigm competing counts,
+Compensatory/Lex competing detail, and quality checks.
 
 Text-only; no matplotlib dependency.  Run::
 
@@ -134,6 +145,28 @@ class Stats:
         self.nl_profile_empty: int = 0
         self.nl_query_empty: int = 0
 
+        # [10] Paradigm × level × bucket slot counts.  Bucket is one of
+        # competing / non_competing / independent / single.  Used to
+        # break the competing pool by paradigm-per-level (the piece the
+        # standard [5] pairing section reports only in aggregate).
+        # Key: (paradigm, level, bucket) -> count.
+        self.para_level_bucket: Counter[tuple[str, str, str]] = Counter()
+
+        # [12/13] Per-bank-id landing across buckets, for Comp and Lex.
+        # Key: bank_id -> {competing, non_competing, independent, single}.
+        self.comp_bid_bucket: dict[Any, Counter[str]] = defaultdict(Counter)
+        self.lex_bid_bucket:  dict[Any, Counter[str]] = defaultdict(Counter)
+
+        # Competing pair details: (bank_id, partner_paradigm, partner_bid,
+        # level) -> count.  Restricted to pairs of length 2 whose
+        # pairing_subtype == "competing".
+        self.comp_competing_pairs: Counter[tuple[Any, str, Any, str]] = Counter()
+        self.lex_competing_pairs:  Counter[tuple[Any, str, Any, str]] = Counter()
+
+        # [14] Cross-paradigm competing pair combos (bidirectional).
+        # Key: paradigm -> Counter of partner_paradigm counts.
+        self.para_competing_partners: dict[str, Counter[str]] = defaultdict(Counter)
+
     # -----------------------------------------------------------------
 
     def update(self, rec: dict[str, Any]) -> None:
@@ -239,6 +272,55 @@ class Stats:
         self.nl_query_chars.append(len(q_text))
         if not p_text.strip(): self.nl_profile_empty += 1
         if not q_text.strip(): self.nl_query_empty += 1
+
+        # [10]-[14] Paradigm/bank landing per (level, bucket) + competing
+        # pair details.  Bucket derived from pairing_type / pairing_subtype:
+        #   pairing_type == "single"      -> "single"
+        #   pairing_type == "independent" -> "independent"
+        #   pairing_subtype == "competing"     -> "competing"
+        #   pairing_subtype == "non_competing" -> "non_competing"
+        # Pass-through records (n_p == 0) are skipped from these buckets.
+        pt_ = rec.get("pairing_type")
+        ps_ = rec.get("pairing_subtype")
+        if n_p > 0:
+            if pt_ == "single":
+                bucket = "single"
+            elif pt_ == "independent":
+                bucket = "independent"
+            elif ps_ == "competing":
+                bucket = "competing"
+            elif ps_ == "non_competing":
+                bucket = "non_competing"
+            else:
+                bucket = None
+            if bucket is not None:
+                for pref in prefs:
+                    pa = pref.get("paradigm")
+                    if pa is None: continue
+                    self.para_level_bucket[(pa, level, bucket)] += 1
+                    bid = pref.get("bank_id")
+                    if pa == "CompensatoryPreference":
+                        self.comp_bid_bucket[bid][bucket] += 1
+                    elif pa == "LexicographicPreference":
+                        self.lex_bid_bucket[bid][bucket] += 1
+                if bucket == "competing" and len(prefs) == 2:
+                    p0, p1 = prefs[0], prefs[1]
+                    a, b = p0.get("paradigm"), p1.get("paradigm")
+                    if a and b:
+                        self.para_competing_partners[a][b] += 1
+                        self.para_competing_partners[b][a] += 1
+                    if "CompensatoryPreference" in (a, b):
+                        comp = p0 if a == "CompensatoryPreference" else p1
+                        other = p1 if a == "CompensatoryPreference" else p0
+                        self.comp_competing_pairs[(
+                            comp.get("bank_id"), other.get("paradigm"),
+                            other.get("bank_id"), level)] += 1
+                    if "LexicographicPreference" in (a, b):
+                        lex_ = p0 if a == "LexicographicPreference" else p1
+                        other = p1 if a == "LexicographicPreference" else p0
+                        self.lex_competing_pairs[(
+                            lex_.get("bank_id"), other.get("paradigm"),
+                            other.get("bank_id"), level)] += 1
 
 
 # --------------------------------------------------------------------------- #
@@ -457,6 +539,104 @@ def write_report(stats: Stats, out: Path) -> None:
     push("  templated_nl_query length:\n")
     push(fmt_stats([float(x) for x in stats.nl_query_chars], unit=" ch"))
     push(f"  Empty templated_nl_query records: {stats.nl_query_empty}\n\n")
+
+    # [10]-[14] Paradigm × bucket breakdowns (competing/nc/ind), per level,
+    # plus Compensatory + Lex bank_id + partner detail, plus cross-paradigm
+    # competing pair combos.
+    def _slot(pa: str, lvl: str, bkt: str) -> int:
+        return stats.para_level_bucket.get((pa, lvl, bkt), 0)
+
+    def _competing_table(bucket: str) -> str:
+        lvls = [lv for lv in LEVEL_ORDER if lv in stats.level_counts]
+        paras = sorted(
+            {p for (p, _l, b) in stats.para_level_bucket if b == bucket},
+            key=lambda p: -sum(_slot(p, lv, bucket) for lv in lvls),
+        )
+        if not paras:
+            return "  (none)\n"
+        totals_by_lvl = {lv: sum(_slot(p, lv, bucket) for p in paras) for lv in lvls}
+        grand_total = sum(totals_by_lvl.values())
+        w = max(len(p) for p in paras + ["paradigm"])
+        header = f"  {'paradigm':<{w}}" + "".join(f"  {lv:>7}" for lv in lvls) \
+                 + f"  {'total':>7}  {'share':>7}"
+        sep    = f"  {'-'*w}"        + "".join(f"  {'-'*7}"   for _ in lvls) \
+                 + f"  {'-'*7}  {'-'*7}"
+        out_lines = [header, sep]
+        for pa in paras:
+            row = [_slot(pa, lv, bucket) for lv in lvls]
+            tot = sum(row)
+            share = 100 * tot / grand_total if grand_total else 0.0
+            out_lines.append(
+                f"  {pa:<{w}}" + "".join(f"  {v:>7d}" for v in row)
+                + f"  {tot:>7d}  {share:>6.1f}%"
+            )
+        out_lines.append(
+            f"  {'TOTAL':<{w}}"
+            + "".join(f"  {totals_by_lvl.get(lv,0):>7d}" for lv in lvls)
+            + f"  {grand_total:>7d}"
+        )
+        return "\n".join(out_lines) + "\n"
+
+    push("[10] Paradigm competing distribution per level\n")
+    push(_competing_table("competing"))
+    push("\n")
+
+    push("[11] Paradigm non_competing / independent distribution per level\n")
+    push("  non_competing:\n")
+    push(_competing_table("non_competing"))
+    push("  independent:\n")
+    push(_competing_table("independent"))
+    push("\n")
+
+    def _bid_bucket_table(bid_bucket: dict) -> str:
+        if not bid_bucket:
+            return "  (none)\n"
+        rows = []
+        rows.append(f"  {'bank_id':>7}  {'comp':>6}  {'nc':>6}  {'indep':>6}  {'single':>6}  {'total':>6}")
+        rows.append(f"  {'-'*7}  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*6}")
+        for bid in sorted(bid_bucket):
+            b = bid_bucket[bid]
+            tot = sum(b.values())
+            rows.append(
+                f"  {str(bid):>7}  {b['competing']:>6d}  {b['non_competing']:>6d}  "
+                f"{b['independent']:>6d}  {b['single']:>6d}  {tot:>6d}"
+            )
+        return "\n".join(rows) + "\n"
+
+    def _pair_combo_lines(pairs: dict, label_prefix: str) -> list[str]:
+        if not pairs:
+            return ["  (none)"]
+        out_lines = []
+        for (bid, partner_p, partner_bid, lvl), c in sorted(pairs.items()):
+            out_lines.append(
+                f"  {label_prefix} {str(bid):>3s} × {partner_p:22s} "
+                f"id={str(partner_bid):>3s}  [{lvl:6s}]  ×{c}"
+            )
+        return out_lines
+
+    push("[12] Compensatory bank_id landing per bucket\n")
+    push(_bid_bucket_table(stats.comp_bid_bucket))
+    push(f"  Competing pair combos ({sum(stats.comp_competing_pairs.values())} total):\n")
+    for ln in _pair_combo_lines(stats.comp_competing_pairs, "Comp"):
+        push(ln + "\n")
+    push("\n")
+
+    push("[13] Lexicographic bank_id landing per bucket\n")
+    push(_bid_bucket_table(stats.lex_bid_bucket))
+    push(f"  Competing pair combos ({sum(stats.lex_competing_pairs.values())} total):\n")
+    for ln in _pair_combo_lines(stats.lex_competing_pairs, "Lex "):
+        push(ln + "\n")
+    push("\n")
+
+    push("[14] Cross-paradigm competing pair combos (bidirectional)\n")
+    for pa in sorted(stats.para_competing_partners,
+                     key=lambda p: -sum(stats.para_competing_partners[p].values())):
+        total = sum(stats.para_competing_partners[pa].values())
+        push(f"  {pa}  ({total} competing slots):\n")
+        for partner, c in sorted(stats.para_competing_partners[pa].items(),
+                                  key=lambda kv: -kv[1]):
+            push(f"    ↔ {partner:25s}  ×{c}\n")
+    push("\n")
 
     out.write_text("".join(lines))
 

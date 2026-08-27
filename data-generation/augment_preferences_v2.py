@@ -1,5 +1,56 @@
 #!/usr/bin/env python3
-"""Preference-augment a TravelPlanner test JSONL using a human-curated bank.
+r"""Preference-augment a TravelPlanner test JSONL using a human-curated bank.
+
+=============================================================================
+V2 -- ERRATA FIXES vs augment_preferences.py.  Search "ERRATUM" for each site.
+=============================================================================
+
+E1  parse_km mis-parsed decimal distances.
+    The regex ``([\d,]+)\s*km`` cannot span a ".", so it matched only the
+    digits AFTER the decimal point: "94.0 km" -> 4.0, "98.6 km" -> 6.0.
+    143/17602 rows of distance.csv are affected -- every sub-100 km leg, which
+    the CSV writes with a decimal.  It failed SOFT (a plausible float, not an
+    error), so the wrong value flowed straight into cost arithmetic.
+    Measured v1 impact: ground cost wrong on 47/225 test and 201/1000
+    test_large rows (worst $94); 2 tours passed the transport cap on a wrong
+    number (qid 280, 603); 28-47/1000 tours would have been SELECTED
+    differently (10/225 in the test split).
+    Fix: parse the full number, and fail loudly on a non-empty value that
+    cannot be parsed instead of silently returning None.
+
+E2  _ground_leg_block advertised unusable ground legs as available.
+    A leg whose duration exceeds a day is refused by GoogleDistanceMatrix.run
+    AND scored invalid by commonsense_constraint.is_valid_information_in_sandbox
+    (run_for_evaluation returns cost=None).  _ground_leg_block had no such
+    check and emitted available=True with a cost, so reference_information
+    offered the planner an option the grader then rejected.
+    Measured v1 impact: 68/1338 available ground blocks on test (18/225 rows);
+    346/5886 on test_large (92/1000 rows).
+    Fix: mark those blocks unavailable, with an explicit reason string.
+
+E2b (follows from E2, gated by REJECT_OVERDAY_GROUND_LEGS below)
+    The tour picker had the same blind spot: _tour_transport_cost costed
+    over-a-day ground legs as usable, so it could pin a tour whose legs no
+    planner can legally travel.  Result in v1: 5/225 test and 33/1000
+    test_large records where some leg has NO usable transport at all (zero
+    flights AND both ground modes unusable) -- unsolvable under their own
+    prescribed tour, contradicting the dataset card's feasibility guarantee.
+    Fix: treat an over-a-day ground leg as unavailable for costing, so the
+    picker prefers tours whose every leg is actually travellable.
+    This is the only change here that alters TOUR SELECTION beyond E1; set
+    REJECT_OVERDAY_GROUND_LEGS = False to keep v1 picker behaviour.
+
+E3  distance.csv duplicates were resolved in the opposite direction.
+    17602 rows but only 16156 unique (origin, destination) pairs -- 1382
+    duplicated, 25 with conflicting distance/duration.  GoogleDistanceMatrix
+    uses pandas .values[0] (FIRST row wins, and that is what the grader
+    charges); load_distance's dict assignment overwrote (LAST row wins).
+    Measured v1 impact: 7/225 test and 23/1000 test_large rows, worst $19.
+    Fix: keep the first occurrence, matching the grader.
+
+Root cause common to E1 and E3: two independent parsers/loaders for one CSV
+column, never cross-checked.  plan-generation/agentic/
+verify_tool_evaluator_consistency.py is the regression gate for that.
 
 8 paradigms (Atomic, Composite, Numeric, Conditional, Lexicographic,
 Compensatory, Temporal, Scoped) are balanced equally across queries.
@@ -652,16 +703,36 @@ def load_flight_records(db_dir: Path) -> dict[tuple[str, str], list[dict[str, An
     return dict(out)
 
 
-def parse_km(s: Any) -> float | None:
-    if not isinstance(s, str):
+def parse_km(s: Any, *, strict: bool = True) -> float | None:
+    r"""ERRATUM E1 -- parse a "1,972 km" / "94.0 km" distance string.
+
+    v1 used ``re.search(r"([\d,]+)\s*km", s)``.  ``[\d,]`` excludes ".", so
+    on "94.0 km" the only run of digits/commas that can precede " km" is the
+    "0" -- the function returned 0.0 and no error.  Distances >= 100 km are
+    written without a decimal in distance.csv, which is why the bug stayed
+    invisible: it only bites the short intra-state hops that multi-city tours
+    are made of.
+
+    The decimal group is now optional-but-matched, and ``strict`` makes a
+    non-empty unparseable value raise instead of degrading to None.  On the
+    current distance.csv that raises for 0 rows, so ``strict=True`` is a
+    no-op there -- it exists to make the NEXT format drift loud instead of
+    silent, which is what would have caught this at construction time.
+    """
+    if not isinstance(s, str) or not s.strip():
         return None
-    m = re.search(r"([\d,]+)\s*km", s)
-    if not m:
-        return None
-    try:
-        return float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
+    m = re.search(r"([\d,]+(?:\.\d+)?)\s*km", s)
+    if m:
+        try:
+            return float(m.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    if strict:
+        raise ValueError(
+            f"parse_km: cannot parse a distance from {s!r}. "
+            f"Fix the parser or the data -- do not return None silently."
+        )
+    return None
 
 
 def load_distance(db_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
@@ -674,7 +745,16 @@ def load_distance(db_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
                 cost = float(r["cost"]) if r.get("cost") else None
             except ValueError:
                 cost = None
-            out[(r["origin"], r["destination"])] = {
+            key = (r["origin"], r["destination"])
+            if key in out:
+                # ERRATUM E3 -- distance.csv has 1382 duplicated pairs (17602
+                # rows, 16156 unique), 25 with conflicting values.  The grader
+                # reads them through GoogleDistanceMatrix, which takes
+                # .values[0] -> the FIRST row.  v1's plain dict assignment
+                # kept the LAST.  Keep the first so this table and the grader
+                # charge the same distance.
+                continue
+            out[key] = {
                 "cost": cost,
                 "distance_km": km,
                 "duration": (r.get("duration") or "").strip() or None,
@@ -1144,7 +1224,10 @@ def _min_leg_cost(o: str, d: str, date: str | None,
         if prices:
             costs.append(min(prices) * max(people, 1))
     d_row = distance.get((o, d)) or distance.get((d, o)) or {}
-    km = d_row.get("distance_km")
+    # ERRATUM E2b -- same rule as _tour_transport_cost._leg_km, so per-leg
+    # ordering and aggregate costing agree on which legs are travellable.
+    km = (None if (REJECT_OVERDAY_GROUND_LEGS and _ground_leg_unusable(d_row))
+          else d_row.get("distance_km"))
     if km is not None:
         if "self-driving" in modes_allowed:
             costs.append(km * 0.05)   # osunlp cost model
@@ -1186,7 +1269,12 @@ def _tour_transport_cost(tour: list[str], org: str,
     taxis_needed = _math.ceil(people / 4)
 
     def _leg_km(o: str, d: str) -> float | None:
+        # ERRATUM E2b -- None here makes the whole all-taxi / all-self-driving
+        # tour infeasible, which is the intent: if one leg cannot legally be
+        # driven, the mode-exclusive tour cannot use that mode at all.
         row = distance.get((o, d)) or distance.get((d, o)) or {}
+        if REJECT_OVERDAY_GROUND_LEGS and _ground_leg_unusable(row):
+            return None
         return row.get("distance_km")
 
     # All-Flight tour.
@@ -1244,6 +1332,27 @@ def _tour_transport_cost(tour: list[str], org: str,
 # country queries where flights are pricier, tight enough that
 # runaway-taxi tours (qid-809-style) still fail.
 TRANSPORT_BUDGET_CAP_FRAC = 0.50
+
+# ERRATUM E2b -- when True, a ground leg whose duration exceeds a day is
+# treated as UNAVAILABLE for tour costing, matching what the grader does
+# (GoogleDistanceMatrix.run refuses it; run_for_evaluation returns cost=None;
+# commonsense_constraint then fails the plan).  v1 costed such legs as usable,
+# which let the picker pin tours no planner can legally travel -- 5/225 test
+# and 33/1000 test_large records ended up with a leg having NO usable
+# transport at all.  Set False to reproduce v1 picker behaviour exactly.
+REJECT_OVERDAY_GROUND_LEGS = True
+
+
+def _ground_leg_unusable(row: dict[str, Any] | None) -> bool:
+    """True when a distance-table row describes a ground leg the grader will
+    refuse.  Single definition, shared by the tour-costing helpers and
+    _ground_leg_block, so the picker and reference_information cannot drift
+    apart again."""
+    if not row:
+        return True
+    if row.get("distance_km") is None:
+        return True
+    return "day" in str(row.get("duration") or "")
 
 
 # Landmark cities whose inclusion in the pre-hoc tour is boosted so
@@ -5965,6 +6074,15 @@ def _ground_leg_block(mode: str, o: str, d: str,
         return {"Description": desc,
                 "Content": {"available": False,
                             "reason": "no ground-transport distance data"}}
+    # ERRATUM E2 -- v1 advertised over-a-day legs as available, with a cost.
+    # GoogleDistanceMatrix.run refuses them and commonsense_constraint scores
+    # the plan invalid in the sandbox, so the planner was being offered an
+    # option it would then be punished for taking.
+    if "day" in str(d_row.get("duration") or ""):
+        return {"Description": desc,
+                "Content": {"available": False,
+                            "reason": ("trip exceeds one day; not a usable "
+                                       "travel option")}}
     # osunlp cost model: self-driving ≈ $0.05/km, taxi ≈ $1.00/km.
     if mode == "self-driving":
         cost = round(km * 0.05, 2)

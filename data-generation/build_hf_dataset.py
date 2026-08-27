@@ -15,8 +15,16 @@ data-generation directory and writes two files into ``HF-data/``:
     (~225 rows), a balanced subset of ``test_large`` selected by
     ``data-generation/build_balanced_subset.py``.  Each row carries an
     ``id`` (contiguous, 1..N-of-subset) as its first key, immediately
-    followed by ``source_id`` (the ``id`` of the same row in
-    ``test_large``).
+    followed by ``source_id`` -- the record's POSITION in the source
+    file (1..N-of-source, counted across ALL records regardless of
+    whether they had a rendered LLM query at emit time).  This makes
+    the ``source_id`` STABLE across a Phase 1 build (subset qids
+    LLM-rendered only) and a Phase 2 build (all records rendered):
+    once Phase 2's ``test_large.jsonl`` contains all ~1000 rows in
+    source order, its contiguous ``id`` values will match the
+    ``source_id``s written by Phase 1's ``test.jsonl``.  Do not rely
+    on ``source_id`` matching ``test_large.id`` during a Phase 1 build
+    where ``test_large`` still only contains the subset.
 
 Which source records land in the ``test`` split is driven by
 ``--subset-ids`` (default ``data-generation/prefertripplan.subset.ids.txt``):
@@ -38,8 +46,23 @@ Emitted fields (per record):
   budget                  -- emitted trip budget (int)
   level                   -- easy / medium / hard (from record)
 
-  query                   -- LLM-rendered fluent trip request
+  query                   -- LLM-rendered fluent trip request, combined
+                             (constraints + preferences)
                              (from ``llm_nl_query``)
+  query_source            -- LLM-rendered constraint-only base of the query
+                             (opener + trip facts + hard constraints; NO
+                             preferences).  Enables without-preferences
+                             ablations vs the full ``query``.
+                             (from ``llm_nl_query_without_preferences``;
+                             empty string on records whose cache entries
+                             are legacy plain-text)
+  query_preferences       -- LLM-rendered preferences-only continuation
+                             of the query (soft preferences paragraph
+                             that flows out of ``query_source``).
+                             ``query == query_source + " " + query_preferences``
+                             modulo the exact connector wording.
+                             (from ``llm_nl_only_preferences``; empty
+                             string on legacy cache entries)
   reference_information   -- JSON-string of the pool blocks the planner may
                              draw from.  Structure: a list of
                              { Description, Content } blocks.  The FIRST
@@ -221,9 +244,17 @@ def build_record(r: dict[str, Any]) -> dict[str, Any] | None:
         "budget":               r.get("budget"),
         "level":                r.get("level"),
 
-        # NL fields
-        "query":   query,
-        "profile": r.get("llm_nl_profile") or "",
+        # NL fields.  ``query`` is the combined (constraints + preferences)
+        # rendering.  ``query_source`` and ``query_preferences`` are the
+        # two split halves — the constraint-only base and the preference-
+        # only continuation — so downstream can run with-preferences vs
+        # without-preferences ablations against the same records.  Absent
+        # on records whose cache entries are legacy plain-text (pre-JSON
+        # prompt); default to empty strings there.
+        "query":             query,
+        "query_source":      r.get("llm_nl_query_without_preferences") or "",
+        "query_preferences": r.get("llm_nl_only_preferences") or "",
+        "profile":           r.get("llm_nl_profile") or "",
 
         # simple string
         "profile_drift": r.get("profile_drift_mode"),
@@ -306,23 +337,35 @@ def main() -> None:
             line = line.strip()
             if not line:
                 continue
-            n_in += 1
+            n_in += 1               # source ordinal -- position in the input
+                                    # across ALL records (whether or not this
+                                    # record has llm_nl_query yet).  Used as
+                                    # test.source_id so subset records point
+                                    # to the position they WILL hold in a
+                                    # fully-rendered test_large; the pointer
+                                    # stays valid across Phase 1 (subset
+                                    # only) and Phase 2 (all records).
             r = json.loads(line)
             row = build_record(r)
             if row is None:
                 n_skipped += 1
                 continue
-            # test_large: id (contiguous) is the first key.
+            # test_large: id (contiguous) is the first key.  During Phase 1,
+            # id_large runs 1..225 (subset only); during Phase 2 it runs
+            # 1..1000 (all records).  test.source_id uses n_in instead so
+            # subset records can be re-matched after Phase 2 rebuilds
+            # test_large.
             id_large += 1
             large_row = {"id": id_large, **row}
             f_large.write(json.dumps(large_row, ensure_ascii=False) + "\n")
 
             # test split: same underlying row, but with a contiguous id
-            # and a source_id pointing back to the test_large id.
+            # and a source_id pointing to the source-position (stable
+            # across Phase 1 / Phase 2 regeneration).
             qid = r.get("query_id")
             if qid in subset_ids:
                 id_test += 1
-                test_row = {"id": id_test, "source_id": id_large, **row}
+                test_row = {"id": id_test, "source_id": n_in, **row}
                 f_test.write(json.dumps(test_row, ensure_ascii=False) + "\n")
                 unmatched_subset_ids.discard(qid)
 

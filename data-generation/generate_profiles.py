@@ -643,7 +643,23 @@ def _fmt_scope(scope) -> str:
 
 
 def _fmt_atomic(node: dict, with_scope: bool = True) -> str:
-    """Format a resolved AtomicPreference-like dict."""
+    """Format a resolved AtomicPreference-like dict.
+
+    Accepts BOTH shapes the bank uses interchangeably:
+
+      * FLAT:   ``{"entity_type": ..., "attribute": ..., "op": ..., "value": ..., "scope": ...}``
+      * NESTED: ``{"class": "AtomicPreference", "template": {<flat fields>}}``
+
+    Some paradigm slots (ScopedPreference.inner.template.subject_ap,
+    Composite.children[i] in some banks, etc.) carry the nested shape;
+    Temporal.subject_ap in a Scoped-inner Temporal (bank_id=26 pattern)
+    hits this path.  Without the unwrap, ``node.get("entity_type")``
+    returns ``None`` and the output collapses to ``None.None None None``.
+    """
+    if not isinstance(node, dict):
+        return "?"
+    if node.get("class") and isinstance(node.get("template"), dict):
+        node = node["template"]
     ent  = node.get("entity_type") or node.get("entity")
     attr = _fmt_attr(ent, node.get("attribute"))
     op   = node.get("op")
@@ -1445,8 +1461,16 @@ def _emit_sources_for_atomic(
     # tolerance — the user is OK with smoking-permitted accommodations.
     # In preferences the value arrives as "No smoking" and the semantic
     # flips depending on op:
-    #   * ``in / ==``    => user wants no-smoking enforced (averse)
-    #   * ``not_in / !=``=> user OK with smoking allowed (tolerant)
+    #   * ``in / == / contains_all``  => user wants no-smoking enforced
+    #                                     (averse to smoking)
+    #   * ``not_in / !=``             => user OK with smoking allowed
+    #                                     (tolerant)
+    # ``contains_all`` is the current bank operator for AND-KIND
+    # inclusion on house_rules (subset semantic: every listed rule must
+    # be on the property).  With a "No X" value it means "the property
+    # must carry the no-X restriction" -- same profile signal as the
+    # legacy ``in`` (which used to be subset-coerced for house_rules
+    # via the now-retired SUBSET_IN_ATTRS override).
     # Both polarities ultimately use the SAME trait_key (the bare token);
     # the trait_table differs (HOUSE_RULE_TRAITS for tolerant,
     # HOUSE_RULE_TRAITS_INVERSIONS for averse).  Same value with
@@ -1464,7 +1488,7 @@ def _emit_sources_for_atomic(
                 continue
             # Determine semantic: tolerant vs averse
             if has_no_prefix:
-                averse = op in ("in", "==")
+                averse = op in ("in", "==", "contains_all")
             else:
                 averse = op in ("not_in", "!=")
             if averse:
