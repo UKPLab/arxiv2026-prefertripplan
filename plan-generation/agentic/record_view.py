@@ -86,7 +86,9 @@ class HarnessView:
     org: str
     dest: str
     n_cities: int
-    budget: float | None = None     # for fact-accuracy reporting only
+    budget: float | None = None     # fact-accuracy reporting, and the oracle's
+                                    # budget threshold -- structured input, like
+                                    # `people`, never rendered to the agent
 
     def tool_call_budget(self, extra_calls: int, dest_is_state: bool) -> int:
         """Tool calls allowed during the tool-use phase, derived from the instance.

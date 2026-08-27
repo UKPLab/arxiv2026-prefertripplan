@@ -66,7 +66,6 @@ class Trajectory:
     # with cached=True, or failing that the last by `finished_at`.
     cached: bool = False
     verify_repair_rounds: int = 0        # rounds actually run, not the budget
-    rounds_to_feasible: int | None = None      # first round the oracle passed
     # The repair loop can end on a plan worse than one it already had: an
     # observed record cycled between four plans chasing a check that could
     # never pass, and would have shipped its last rather than its best.
@@ -74,11 +73,17 @@ class Trajectory:
     reverted_to_best: bool = False       # the last plan was NOT the one returned
     repair_cycle: bool = False           # a plan repeated -> loop was thrashing
     n_inert_checks: int = 0              # usable checks that can never return False
+    n_revision_refused: int = 0          # revise_checks calls past the budget
     peak_context_tokens: int = 0
     n_tool_calls: int = 0
     n_arg_errors: int = 0
     n_unknown_tool: int = 0
     wall_s: float = 0.0
+
+    # Every distinct plan the episode produced, each scored at the end under
+    # the final check-set: {round, oracle_ok, n_fail, note, selected}. Makes the
+    # delivery decision auditable without recomputing it.
+    candidates: list = field(default_factory=list)
 
     def totals(self) -> dict:
         return {
@@ -104,7 +109,6 @@ class Trajectory:
                 "submitted": self.submitted, "forced_submit": self.forced_submit,
                 "fallback_used": self.fallback_used, "stop_reason": self.stop_reason,
                 "verify_repair_rounds": self.verify_repair_rounds,
-                "rounds_to_feasible": self.rounds_to_feasible,
                 "n_tool_calls": self.n_tool_calls, "wall_s": round(self.wall_s, 1),
                 **t}
 

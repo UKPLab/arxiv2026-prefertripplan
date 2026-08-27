@@ -62,13 +62,20 @@ so if you misread them your checks will be wrong -- nothing else supplies them.
 Then write down every requirement this trip must satisfy.
 Cover three kinds:
 
-  commonsense  unstated rules any sensible itinerary obeys (e.g. avoid or minimize 
-               repetition; stay somewhere each night except the last; return to
-               the origin; visit only cities on the itinerary etc.). These should
-               be checks regarding completeness, consistency and validity of information, 
-               reasonable considerations and scoping for within city and inter-city 
-               activities, and the constraint values on the plan's entity side, if 
-               any, e.g. any limiting or binding requirement.
+  commonsense  rules any sensible itinerary obeys that nobody writes down -- and
+               one you do not think of is one nothing checks. Cover both how the
+               trip moves between cities and what happens within one, and apply
+               each rule to every item it could touch, not just the first. Ask
+               of each: is the information complete and valid, both that the 
+               entity exists and that its own listing can support the way the plan 
+               uses it; what must stay invariant or consistent, and over what span 
+               -- a day, a stay, the whole trip; and where variety is possible, 
+               is it there instead of the same entry repeated, do all things exist 
+               that should exist and be present in the plan. The usual gaps are
+               judging a day alone when the property only holds across the trip,
+               and covering only the entity kinds the request happens to
+               mention. When the list feels done, walk the plan format field by
+               field and ask what is unchecked.
   hard         requirements stated in the query that must hold (budget, cuisines,
                room type, house rules, transport restrictions)
   preference   softer wishes expressed in the query, including any conditional,
@@ -96,18 +103,33 @@ Scope is the part that is easiest to get wrong, so state it:
                every single restaurant be one of the three. Coverage quantifies
                over the SET, and asks the plan to cover it.
 
-Write which one you mean.
+Write according to which one you mean.
+
+What the plan names, and what each carries. These are the attributes your checks
+will be able to read, so a constraint over any of them is one you can enforce:
+
+  flight          price per traveller, departure and arrival time
+  ground leg      cost per vehicle, distance, duration
+  restaurant      cost per person, rating, cuisines
+  attraction      rating, categories
+  accommodation   price for one whole unit for one night (not a per-traveller
+                  rate), rating, room type, house rules, minimum nights,
+                  maximum occupancy
+  any of them     whether it exists in the database at all
 
 Costs split in two, and the split matters.
 
 PER-ITEM costs are yours to check, and most preferences are about them -- "every
 stay at $360 per person per night or less", "restaurants at $60 or more must be
-rated 3.5+". Read the units the request gives: a listing price is per room per 
-night, so "per person per night" needs dividing by how many the room sleeps, and 
-your check has the numbers to do it. Similar estimates for road-based transportation 
-e.g. self-driving or taxi with self-driving supporting 5 person in a vehicle while 
-taxi supporting 4 person in a vehicle. The number of vehicle required would also 
-then be required to be calculated for cost estimation.
+rated 3.5+". Read the units the request gives against the units the data uses.
+An accommodation price buys one whole unit for one night, and units come whole:
+a party takes as many as it needs to fit, pays for every one of them, and a
+per-person figure is that total shared across the party. It is not the price
+divided by how many the room sleeps -- a lone traveller books a whole unit and
+pays for a whole unit. Road transport has the same shape: a ground leg cost is
+per vehicle, self-driving seats five and a taxi four, so a party takes as many
+vehicles as it needs and pays the leg cost for each. Restaurant cost is already
+per person per sitting, and flight price is already per traveller.
 
 Do NOT write a constraint for the TOTAL trip cost against the budget -- not even
 one that defers to the environment. Leave it out of your list entirely. The
@@ -189,11 +211,15 @@ Each must be exactly:
         #       Values are RAW, and the units differ per field. Getting these
         #       wrong is the likeliest way for a check to be confidently wrong:
         #         restaurant  `cost` is per person, per sitting
-        #         accommodation `cost` is the LISTING price -- per room, per
-        #                     night. A "per person per night" preference needs
-        #                     dividing by how many the room sleeps
-        #                     (`maximum_occupancy`), with proper rounding, and a 
-        #                     whole-stay figure needs multiplying by the nights used
+        #         accommodation `cost` buys one whole unit for one night, not a
+        #                     per-traveller rate. A party takes as many whole
+        #                     units as it needs to fit and pays for each, so a
+        #                     per-person figure is that total shared across the
+        #                     party -- NOT `cost` divided by
+        #                     `maximum_occupancy`, which would charge a lone
+        #                     traveller a fraction of a unit they booked
+        #                     outright. A whole-stay figure multiplies by the
+        #                     nights used.
         #         ground leg  `cost` is PER VEHICLE for the leg, not per party
         #                     and not per person. A party larger than one
         #                     vehicle holds needs more than one vehicle, so a

@@ -125,21 +125,47 @@ class OracleVerdict:
     problems: list[str] = field(default_factory=list)   # "day 2: ..." per issue
     per_day: list[str] = field(default_factory=list)    # raw ReactEnv messages
     terminated: bool = False                # env's own retry budget exhausted
+    # The env prices a day and reports which named entities it could not find.
+    # It is handed no budget and reads none -- `tested_data` has no such key --
+    # so the comparison is made here and folded into the same verdict. Keeping
+    # it separate bought nothing: the round gate ANDed them anyway, and
+    # `problems` plus `cost` already tell the two failures apart afterwards.
+    #
+    # The threshold is the record's budget, arriving the same way people_number
+    # does. An earlier version used the budget the agent had parsed, which made
+    # the oracle depend on the thing it is meant to check independently -- a
+    # misread budget would have moved its own goalposts. Whether the agent read
+    # it correctly is a separate question, already answered by fact_accuracy.
+    budget: float | None = None
+
+    @property
+    def over_by(self) -> float | None:
+        if self.cost is None or not isinstance(self.budget, (int, float)):
+            return None                     # a missing number is not a violation
+        return round(self.cost - self.budget, 2) if self.cost > self.budget else None
 
     @property
     def ok(self) -> bool:
-        return not self.problems
+        return not self.problems and self.over_by is None
 
     def as_message(self) -> str:
         """What the agent sees. Plan-level, built from the env's own strings."""
-        if self.ok:
-            return f"The cost of your plan is {self.cost} dollars."
-        head = ("Sorry, the cost of your plan is not available because of the "
-                "following reasons:")
-        return head + " " + " ".join(f"{i+1}. {p}" for i, p in enumerate(self.problems))
+        if self.problems:
+            head = ("Sorry, the cost of your plan is not available because of the "
+                    "following reasons:")
+            return head + " " + " ".join(f"{i+1}. {p}"
+                                         for i, p in enumerate(self.problems))
+        msg = f"The cost of your plan is {self.cost} dollars."
+        if self.over_by is not None:
+            return (f"{msg} That is OVER your stated budget of {self.budget} by "
+                    f"{self.over_by}. Bring the total down.")
+        if isinstance(self.budget, (int, float)):
+            return f"{msg} That is within your stated budget of {self.budget}."
+        return msg
 
 
 def evaluate_with_oracle(plan_days: list[dict], people: int, *,
+                         budget: float | None = None,
                          reset: bool = True) -> OracleVerdict:
     """Score a whole plan by calling the original env once per day.
 
@@ -165,7 +191,7 @@ def evaluate_with_oracle(plan_days: list[dict], people: int, *,
                 if r:
                     problems.append(f"day {day}: {r}")
     return OracleVerdict(cost=None if problems else round(total, 2),
-                         problems=problems, per_day=raw,
+                         problems=problems, per_day=raw, budget=budget,
                          terminated=bool(getattr(env, "is_terminated", False)))
 
 
@@ -296,8 +322,14 @@ class Runner:
         # Best plan seen, not last plan seen. Scored (oracle_ok, -failing checks)
         # with ties going to whichever arrived first, so a later plan has to be
         # strictly better to displace an earlier one.
-        self._best: str | None = None
-        self._best_score: tuple | None = None
+        # Candidates are recorded as they appear and scored ONCE at the end,
+        # under the final check-set. Scoring online meant a plan from round 1
+        # and a plan from round 3 could be compared under different checks if
+        # the agent revised in between -- not a weakening problem specifically,
+        # just two measurements with different rulers. Deferring makes them
+        # comparable by construction, and makes a lenient check-set a constant
+        # offset across all candidates, which cannot move an argmax.
+        self._candidates: list[dict] = []
         self._seen_plans: set[str] = set()
         self._consec_idle = 0
         self._peak_context = 0
@@ -381,6 +413,15 @@ class Runner:
             used += 1
         if not self.spec.constraints:
             return
+        # Did the agent read the trip right? Pure telemetry -- computed once,
+        # never fed back, never shown. The oracle thresholds on the record's
+        # own numbers precisely so it does not depend on this; measuring the
+        # agent's parse is the separate question, and this is where it is
+        # answered. Declared long before it was wired, so it silently reported
+        # {} on every record until now.
+        self.traj.fact_accuracy = self.spec.fact_accuracy(
+            {"days": self.hv.days, "people": self.hv.people,
+             "budget": self.hv.budget, "dates": self.hv.dates})
 
         turn = self._turn("spec_python",
                           P.spec_python(self.spec.pseudocode_block()), None)
@@ -569,19 +610,19 @@ class Runner:
             days = convert_plan(self._plan)
             if not days:
                 oracle_msg, oracle_ok = "The plan could not be parsed into days.", False
-                verdicts, checks_ok = [], False
+                verdicts, checks_ok, cost = [], False, None
             else:
-                v = evaluate_with_oracle(days, self.hv.people, reset=(rnd == 1))
-                oracle_msg, oracle_ok = v.as_message(), v.ok
+                v = evaluate_with_oracle(days, self.hv.people,
+                                         budget=self.hv.budget, reset=(rnd == 1))
+                oracle_msg, oracle_ok, cost = v.as_message(), v.ok, v.cost
                 self.traj.oracle_rounds.append(
                     {"round": rnd, "ok": v.ok, "cost": v.cost,
-                     "problems": v.problems[:8], "terminated": v.terminated})
-                if v.ok and self.traj.rounds_to_feasible is None:
-                    self.traj.rounds_to_feasible = rnd
+                     "over_by": v.over_by, "problems": v.problems[:8],
+                     "terminated": v.terminated})
                 verdicts, checks_ok = self._run_checks(days, rnd)
 
             self.traj.verify_repair_rounds = rnd
-            self._record_candidate(self._plan, rnd, oracle_ok, verdicts)
+            self._record_candidate(self._plan, rnd, oracle_ok, cost)
             if oracle_ok and checks_ok:
                 self.traj.stop_reason = "verified"
                 return
@@ -597,13 +638,24 @@ class Runner:
 
             revised = False
             for tc in turn.tool_calls:
-                if tc.name == "revise_checks" and tc.args and spec_turns_left > 0:
-                    spec_turns_left -= 1
-                    n = self._apply_revision(tc.args, rnd)
-                    revised = True
-                    self.messages.append({"role": "tool", "tool_call_id": tc.id,
-                                          "content": f"{n} check(s) updated. "
-                                                     f"Re-running verification."})
+                if tc.name == "revise_checks" and tc.args:
+                    if spec_turns_left > 0:
+                        spec_turns_left -= 1
+                        n = self._apply_revision(tc.args, rnd)
+                        revised = True
+                        self.messages.append({"role": "tool", "tool_call_id": tc.id,
+                                              "content": f"{n} check(s) updated. "
+                                                         f"Re-running verification."})
+                    else:
+                        # Every agent that revised did so twice; the second call
+                        # matched no branch, so no tool message was appended and
+                        # the model was left waiting on a reply that never came.
+                        # Refuse it out loud instead.
+                        self.traj.n_revision_refused += 1
+                        self.messages.append({"role": "tool", "tool_call_id": tc.id,
+                                              "content": "Revision budget spent -- "
+                                                         "no further check edits this "
+                                                         "episode. Submit a plan instead."})
                 elif tc.name == "submit_plan" and tc.args:
                     self._plan = tc.args.get("travel_plan", self._plan)
                     self.messages.append({"role": "tool", "tool_call_id": tc.id,
@@ -621,19 +673,64 @@ class Runner:
                 self.traj.repair_cycle = True
                 self.traj.stop_reason = "repair_cycle"
                 return
+            self._record_candidate(self._plan, rnd + 1)
         self.traj.stop_reason = self.traj.stop_reason or "verify_repair_rounds_exhausted"
+        self._record_candidate(self._plan, self.traj.verify_repair_rounds + 1)
 
     def _record_candidate(self, plan: str | None, rnd: int,
-                          oracle_ok: bool, verdicts: list) -> None:
-        """Keep the best-scoring plan of the episode, not the most recent one."""
+                          oracle_ok: bool | None = None,
+                          cost: float | None = None) -> None:
+        """Note a distinct plan. Scoring happens later, in `_select_plan`."""
         if not (plan or "").strip():
             return
-        self._seen_plans.add(plan.strip())
-        n_fail = sum(1 for v in verdicts if v.ok is False)
-        score = (1 if oracle_ok else 0, -n_fail)
-        if self._best_score is None or score > self._best_score:
-            self._best, self._best_score = plan, score
-            self.traj.best_plan_round = rnd
+        body = plan.strip()
+        for c in self._candidates:
+            if c["plan"] == body:                    # already a candidate
+                if oracle_ok is not None and c["oracle_ok"] is None:
+                    c["oracle_ok"] = oracle_ok       # first time it was verified
+                    c["cost"] = cost
+                return
+        self._seen_plans.add(body)
+        self._candidates.append({"round": rnd, "plan": body,
+                                 "oracle_ok": oracle_ok, "cost": cost})
+
+    def _select_plan(self) -> str | None:
+        """Score every candidate under the FINAL check-set and return the best.
+
+        Key is (oracle_ok, -failing checks), ties to the earliest round, so a
+        later plan has to be strictly better to displace an earlier one. A
+        candidate that never reached verification has oracle_ok=None, which
+        sorts below a confirmed pass and above a confirmed failure -- unknown
+        is not evidence either way.
+        """
+        if not self._candidates:
+            return None
+        runnable = {c.id: c.python for c in self.spec.constraints if c.usable}
+        rank = {True: 2, None: 1, False: 0}
+        scored = []
+        for i, cand in enumerate(self._candidates):
+            n_fail, note = 0, ""
+            days = self._convert(cand["plan"]) if self._convert else None
+            if not days:
+                n_fail, note = 99, "unparseable"
+            elif runnable:
+                try:
+                    vs = V.run(runnable, days, self._ctx(),
+                               timeout=self.b.verifier_exec_timeout)
+                    n_fail = sum(1 for v in vs if v.ok is False)
+                except Exception as e:                # scoring must never sink a run
+                    note = f"scoring failed: {type(e).__name__}"
+                    n_fail = 99
+            scored.append({"round": cand["round"], "oracle_ok": cand["oracle_ok"],
+                           "cost": cand.get("cost"), "n_fail": n_fail, "note": note,
+                           "key": (rank[cand["oracle_ok"]], -n_fail, -i)})
+        best = max(range(len(scored)), key=lambda i: scored[i]["key"])
+        for i, row in enumerate(scored):
+            row["selected"] = (i == best)
+            row.pop("key")
+        self.traj.candidates = scored
+        self.traj.best_plan_round = self._candidates[best]["round"]
+        return self._candidates[best]["plan"]
 
     def _run_checks(self, days, rnd: int) -> tuple[list, bool]:
         runnable = {c.id: c.python for c in self.spec.constraints if c.usable}
@@ -687,28 +784,40 @@ class Runner:
         can add a check or repair a broken one but cannot weaken a working one
         into something the plan happens to satisfy.
         """
-        frozen = {c.id: c.python for c in self.spec.constraints if c.usable}
         raw = args.get("checks") or {}
         known = {c.id: c for c in self.spec.constraints}
-        n_applied = n_blocked = 0
+        applied, shadowed, added = [], [], []
         for cid, src in raw.items():
             if not isinstance(src, str) or not src.strip():
                 continue
-            if cid in frozen:
-                n_blocked += 1
+            c = known.get(cid)
+            if c is None:
+                c = V.Constraint(id=str(cid), kind="preference",
+                                 source="query", text="(added at revision)",
+                                 pseudocode="(added at revision)", python=src)
+                known[cid] = c
+                self.spec.constraints.append(c)
+                added.append(cid)
                 continue
-            if cid in known:
-                known[cid].python = src
-            else:
-                known[cid] = V.Constraint(id=str(cid), kind="preference",
-                                          source="query", text="(added at revision)",
-                                          pseudocode="(added at revision)", python=src)
-                self.spec.constraints.append(known[cid])
-            n_applied += 1
+            # Revising a check that RUNS used to be refused outright, to stop an
+            # agent softening a check its plan was failing. Measured, that rule
+            # blocked 6 of 6 revisions across three records, every one of them a
+            # correct diagnosis -- an over-strict city rule, a room type spelled
+            # "Entire home/apt", a check counting absent "-" entries as
+            # restaurants. Prohibition cannot tell a repair from a weakening, so
+            # it is replaced by a shadow: the original keeps running, decides
+            # which plan is delivered, and any disagreement is recorded.
+            if c.usable and c.shadow_python is None:
+                c.shadow_python = c.python
+                shadowed.append(cid)
+            c.python = src
+            applied.append(cid)
         V.preflight(self.spec, self._ctx(), timeout=self.b.verifier_exec_timeout)
+        n_applied = len(applied) + len(added)
         rev = {"round": rnd, "trigger": "agent_requested",
                "reason": str(args.get("reason", ""))[:200],
-               "applied": n_applied, "blocked_rewrites": n_blocked}
+               "applied": n_applied, "applied_ids": applied, "added_ids": added,
+               "shadowed_ids": shadowed}
         self.spec.revisions.append(rev)
         self.traj.spec_revisions.append(rev)
         self.traj.spec_json = self.spec.to_json()
@@ -759,11 +868,11 @@ class Runner:
             if not self._plan:
                 self.run_submit()
             self.run_verify_repair(convert_plan)
-            # The best plan seen, not the last one written. Repair is not
+            # The best candidate, not the last one written. Repair is not
             # monotone: a check that can never pass will keep the agent editing
             # a plan that was already valid, and the loop used to hand back
             # whatever that editing last produced.
-            plan = self._best or self._plan or self.run_submit()
+            plan = self._select_plan() or self._plan or self.run_submit()
         except Exception as e:
             import traceback
             self.traj.stop_reason = f"error: {type(e).__name__}: {e}"[:200]
@@ -773,7 +882,7 @@ class Runner:
             # A mid-episode crash is exactly when the best-seen plan matters:
             # the record still counts, and a verified earlier plan beats
             # whatever half-edited text the agent was holding.
-            plan = self._best or self._plan or ""
+            plan = self._select_plan() or self._plan or ""
         # `submitted` means "this record produced a plan", not "run_submit was
         # called". After the reorder, a plan emitted during tool use reaches
         # verification without run_submit ever running, and the flag was left

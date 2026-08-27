@@ -75,6 +75,14 @@ class Constraint:
     smoke_ok: bool | None = None       # ran on a synthetic plan without raising
     error: str | None = None
     inert: bool = False                # can never return False -> enforces nothing
+    # The source this check had before its first revision, kept verbatim and
+    # never executed at run time. Plan selection is already immune to a
+    # weakened check -- every candidate is scored under the same final
+    # check-set, so leniency is a constant offset -- which leaves one question
+    # for afterwards: did a revision repair a broken check or soften a working
+    # one? This is the record that lets a diagnostic answer it offline. Set
+    # once, so it holds the blind-authored original rather than a chain of edits.
+    shadow_python: str | None = None
 
     @property
     def usable(self) -> bool:
