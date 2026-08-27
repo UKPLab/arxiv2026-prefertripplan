@@ -113,8 +113,9 @@ class Spec:
         return [c.id for c in self.constraints if c.usable]
 
     def coverage(self) -> float:
-        """Fraction of authored checks that survived pre-flight. Reported per
-        record; results are stratified on it rather than averaged over a mixture."""
+        """Fraction of authored checks that actually enforce something. Reported
+        per record; results are stratified on it rather than averaged over a
+        mixture."""
         if not self.constraints:
             return 0.0
         return sum(c.enforcing for c in self.constraints) / len(self.constraints)

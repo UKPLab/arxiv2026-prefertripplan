@@ -587,7 +587,16 @@ def resolve_plan(plan_days: list[dict]) -> list[dict]:
                "origin": o_c, "dest": d_c,
                "city": d_c if d_c else (_PAREN.sub("", cc).strip() or None),
                "is_travel_day": bool(o_c and d_c),
-               "restaurants": [], "attractions": [], "accommodation": None,
+               "restaurants": [], "attractions": [],
+               # {} rather than None on a day with no stay -- which is the final
+               # day of ~99.5% of plans, since the field means "the night you
+               # book" and you fly home. The key always exists, so the natural
+               # `day.get("accommodation", {})` never sees its default and an
+               # unguarded `.get` on None raised AttributeError; observed
+               # killing two checks on the first qwen record. An empty dict
+               # keeps the documented shape, stays falsy for `if not acc`, and
+               # leaves {"found": False} to mean "named but not in the DB".
+               "accommodation": {},
                "transportation": []}
         for meal in ("breakfast", "lunch", "dinner"):
             v = (unit.get(meal) or "").strip()

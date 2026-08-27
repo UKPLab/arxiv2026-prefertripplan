@@ -109,13 +109,16 @@ e.g. self-driving or taxi with self-driving supporting 5 person in a vehicle whi
 taxi supporting 4 person in a vehicle. The number of vehicle required would also 
 then be required to be calculated for cost estimation.
 
-The TOTAL trip cost against the budget is NOT yours. The environment computes it
-every verification round and is authoritative, because that arithmetic is not a
-lookup -- flights per traveller, ground transport per vehicle at its own
-occupancy, accommodation per room for the nights used, meals per traveller per
-sitting. A hand-rolled total will disagree with the real one and send you
-chasing a violation that is not there. Keep a rough running estimate while
-building so you do not overshoot, and let the environment settle the figure.
+Do NOT write a constraint for the TOTAL trip cost against the budget -- not even
+one that defers to the environment. Leave it out of your list entirely. The
+environment computes it every verification round and is authoritative, because
+that arithmetic is not a lookup: flights per traveller, ground transport per
+vehicle at its own occupancy, accommodation per room for the nights used, meals
+per traveller per sitting. A hand-rolled total will disagree with the real one
+and send you chasing a violation that is not there. Keep a rough running estimate
+while building so you do not overshoot, and let the environment settle the
+figure. Per-item cost constraints ("no meal over 60 per person") are still yours
+-- it is only the total that is out of scope.
 
 Return JSON only:
 {{"facts": {{"days": 3, "dates": ["2025-11-02", "2025-11-03", "2025-11-04"],
@@ -210,8 +213,8 @@ Constraints on your code, enforced automatically:
 
 You cannot query the database from inside a check, but you do not need to:
 ctx["items"] already carries the attributes of everything the plan names. Use
-those for per-item comparisons. Skip the trip TOTAL -- the environment reports
-it. Check only what is in the plan text and in ctx.
+those for per-item comparisons. The trip TOTAL is not among your constraints --
+the environment reports it. Check only what is in the plan text and in ctx.
 
 Before deciding a constraint is not checkable, look again: per-item cost, rating,
 cuisine, category, room type, house rules, flight price, departure and arrival

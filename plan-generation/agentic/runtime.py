@@ -345,6 +345,11 @@ class Runner:
             cost_usd=turn.usage.cost_usd, latency_s=turn.latency_s,
             finish_reason=turn.finish_reason))
         self._peak_context = max(self._peak_context, turn.usage.prompt_tokens)
+        # Mirror it onto the trajectory: the field was declared but never
+        # assigned, so every record reported peak_context_tokens=0 at top level
+        # while totals() carried the real figure. Same source as the budget
+        # gate above, so the two can never disagree.
+        self.traj.peak_context_tokens = self._peak_context
         return turn
 
     def _push_assistant(self, turn) -> None:
