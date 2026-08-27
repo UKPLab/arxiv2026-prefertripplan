@@ -81,7 +81,10 @@ class Constraint:
     # check-set, so leniency is a constant offset -- which leaves one question
     # for afterwards: did a revision repair a broken check or soften a working
     # one? This is the record that lets a diagnostic answer it offline. Set
-    # once, so it holds the blind-authored original rather than a chain of edits.
+    # once, so it holds the first version that RAN rather than a chain of edits
+    # -- normally the blind-authored original, but the version that first
+    # worked if the check was born crashing, since a check that never ran
+    # enforced nothing and there is no earlier behaviour to preserve.
     shadow_python: str | None = None
 
     @property

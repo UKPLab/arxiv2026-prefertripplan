@@ -119,12 +119,19 @@ FILTER_TOOLS = [
          "desc": {"type": "boolean", "description": "Sort descending."}},
         ["entity"]),
     _fn("aggregate_items",
-        "min / max / avg / sum / count over a filtered pool. Use for numeric "
-        "preferences stated as optimisations (maximise average rating, minimise "
-        "total cost) rather than computing the aggregate by hand.",
+        "min / max / avg / sum / count over a filtered pool. With sort_by/desc "
+        "and limit it aggregates only the leading k rows, so it can answer what "
+        "is reachable when several items must be chosen rather than one.",
         {**_WHERE, **_FILTER_ARG,
          "field": {"type": "string", "description": "Numeric field to aggregate."},
-         "op": {"type": "string", "enum": ["min", "max", "avg", "sum", "count"]}},
+         "op": {"type": "string", "enum": ["min", "max", "avg", "sum", "count"]},
+         "sort_by": {"type": "string",
+                     "description": "Field to order by before limiting. "
+                                    "Defaults to `field` when limit is given."},
+         "desc": {"type": "boolean", "description": "Sort descending."},
+         "limit": {"type": "integer",
+                   "description": "Aggregate only the first k rows after "
+                                  "sorting, instead of the whole pool."}},
         ["entity", "field", "op"]),
 ]
 

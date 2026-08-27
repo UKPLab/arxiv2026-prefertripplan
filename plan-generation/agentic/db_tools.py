@@ -463,31 +463,47 @@ def filter_items(entity: str, *, city: str = "", origin: str = "",
 
 def aggregate_items(entity: str, field: str, op: str, *, city: str = "",
                     origin: str = "", destination: str = "", date: str = "",
-                    filters: list[dict] | None = None) -> dict:
+                    filters: list[dict] | None = None,
+                    sort_by: str | None = None, desc: bool = False,
+                    limit: int | None = None) -> dict:
     """min / max / avg / sum / count over a filtered pool.
 
-    Numeric preferences are stated as optimisations ("maximise average rating",
-    "minimise total cost"), so the agent needs the aggregate itself, not just
-    the rows -- computing a mean over 35 rows in-context is exactly where
-    arithmetic slips.
+    `sort_by` / `desc` / `limit` narrow the pool to a leading slice BEFORE the
+    aggregate, which is what makes this usable for an optimisation over several
+    items rather than one. Aggregating the whole pool answers "the best single
+    row available"; a plan that must fill k slots is forced down to the k-th
+    best, and the two differ badly -- over nine Austin meals, whole-pool `min`
+    of cost says 12.0 while the lowest reachable worst-meal is 43.0. Sorting in
+    the direction of the optimisation and limiting to k makes the returned
+    aggregate the achievable bound.
     """
     if op not in AGGREGATES:
         return {"error": "unknown_aggregate", "available": list(AGGREGATES)}
+    if limit is not None and (not isinstance(limit, int) or limit < 1):
+        return {"error": "bad_limit", "reason": "limit must be a positive integer"}
     res = filter_items(entity, city=city, origin=origin, destination=destination,
-                       date=date, filters=filters)
+                       date=date, filters=filters,
+                       sort_by=sort_by or (field if limit else None), desc=desc)
     if "error" in res:
         return res
-    vals = [r.get(field) for r in res["records"] if isinstance(r.get(field), (int, float))]
+    rows = res["records"]
+    matched = len(rows)
+    if limit is not None:
+        rows = rows[:limit]
+    vals = [r.get(field) for r in rows if isinstance(r.get(field), (int, float))]
+    head = {"entity": entity, "field": field, "op": op,
+            "matched": matched, "considered": len(rows)}
+    if limit is not None and matched < limit:
+        head["short"] = (f"only {matched} row(s) match; fewer than the {limit} "
+                         f"requested, so this bound is not reachable")
     if op == "count":
-        return {"entity": entity, "field": field, "op": op,
-                "value": len(res["records"]), "n": len(res["records"])}
+        return {**head, "value": len(rows), "n": len(rows)}
     if not vals:
-        return {"entity": entity, "field": field, "op": op, "value": None,
-                "n": 0, "reason": "no numeric values after filtering"}
+        return {**head, "value": None, "n": 0,
+                "reason": "no numeric values after filtering"}
     v = {"min": min(vals), "max": max(vals), "sum": sum(vals),
          "avg": sum(vals) / len(vals)}[op]
-    return {"entity": entity, "field": field, "op": op,
-            "value": round(float(v), 2), "n": len(vals)}
+    return {**head, "value": round(float(v), 2), "n": len(vals)}
 
 
 # --------------------------------------------------------------------------- #

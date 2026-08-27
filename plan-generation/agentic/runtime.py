@@ -564,7 +564,8 @@ class Runner:
                         max_chars=self.b.tool_result_max_chars)
                 return S.render_scalar(T.aggregate_items(
                     a.get("entity", ""), a.get("field", ""), a.get("op", ""),
-                    filters=a.get("filters"), **kw))
+                    filters=a.get("filters"), sort_by=a.get("sort_by"),
+                    desc=bool(a.get("desc")), limit=a.get("limit"), **kw))
             if tc.name == "notebook_write":
                 return self.nb.write(a.get("label", ""), a.get("content", ""))
             if tc.name == "notebook_list":

@@ -105,6 +105,15 @@ Scope is the part that is easiest to get wrong, so state it:
 
 Write according to which one you mean.
 
+One more split, and it cuts across all three kinds. Almost every constraint is
+settled by the plan on its own -- a threshold on a value, membership of a set, a
+categorical match, a count, an existence, a coverage. However, a constraint asking 
+for the best available ("as cheap as possible", "the highest rated", "prefer fewer") 
+is about your plan measured against what you could have chosen instead, and nothing 
+in the plan says what that was. Mark those, state the quantity and the direction 
+-- MINIMIZE(avg per-person nightly cost) -- and leave the bound until you have 
+seen the pool.
+
 What the plan names, and what each carries. These are the attributes your checks
 will be able to read, so a constraint over any of them is one you can enforce:
 
@@ -166,6 +175,13 @@ Return JSON only:
 Those five are the shape, not the content -- take the actual constraints from
 the request below. A trip usually has several commonsense entries, whatever hard
 constraints the request states, and one or two preferences.
+
+The logic behind a constraint may be multi-hop: a value may have to be derived
+before it can be compared, or the answer may depend on several entities across
+several days, or one condition may only apply where another already holds. Work 
+it through now rather than gesturing at it -- the pseudocode is the record someone
+else would check the plan by. Where you are unsure, still commit to the most
+confident, concise form you can rather than hedging.
 
 Trip request:
 {query}"""
@@ -237,10 +253,27 @@ Constraints on your code, enforced automatically:
 - a function that raises is discarded, and the constraint counts as unverified --
   so prefer defensive parsing over clever parsing.
 
-You cannot query the database from inside a check, but you do not need to:
-ctx["items"] already carries the attributes of everything the plan names. Use
-those for per-item comparisons. The trip TOTAL is not among your constraints --
-the environment reports it. Check only what is in the plan text and in ctx.
+You cannot query the database from inside a check. ctx["items"] carries the
+attributes of everything the plan names, which settles any per-item threshold
+and any aggregate over your own itinerary -- an average, a minimum, a count
+across days. What it cannot tell you is what you did NOT choose.
+
+So a constraint asking for the best available has a part you can write now and a
+part you cannot. Write the computation, and put each bound in its own named
+constant at the top of the function, named for the entity and field it belongs
+to, with your best current estimate:
+
+    def check(plan, ctx):
+        ACCOMMODATION_COST_BOUND = 400.0   # cheapest qualifying stay, per
+                                           # person per night; confirm by search
+        ATTRACTION_RATING_BOUND  = 4.5     # best reachable over 3 attractions
+        ...
+
+One check can carry more than one, so name them rather than reusing a bare
+BOUND -- a later revision has to find the right line. You will be able to fill
+them in once you have searched. The trip TOTAL is not
+among your constraints -- the environment reports it. Otherwise check only what
+is in the plan text and in ctx.
 
 Before deciding a constraint is not checkable, look again: per-item cost, rating,
 cuisine, category, room type, house rules, flight price, departure and arrival
@@ -286,13 +319,24 @@ Tools available now:
                                  (categories, cuisines, house_rules_list) 'in'
                                  means the row has ANY of the values and
                                  'contains_all' means it has ALL of them.
+                                 `sort_by` a field, with `desc` as True or False 
+                                 for descending, to bring the optimal survivors 
+                                 to the top or bottom respectively. Filtering 
+                                 says what is allowed; sorting says which to take.
                                  It reports how many rows were dropped, so you
                                  can tell an over-strict filter from an empty
                                  pool.
   aggregate_items(entity, field, op, ...)
                                  min / max / avg / sum / count over a filtered
-                                 pool. Use it for preferences phrased as
-                                 optimisations rather than averaging by hand.
+                                 pool. Bare, it describes the whole pool: the
+                                 best rating anywhere in it, the lowest price,
+                                 how many rows survive a filter. Add `sort_by`
+                                 (`desc` to reverse) and `limit` k and it
+                                 aggregates only the leading k rows instead --
+                                 what you get if you take the k best. `sort_by`
+                                 defaults to the aggregated field. It reports
+                                 `matched` and `considered`, and says so when
+                                 fewer than k rows exist.
 
   notebook_write(label, content) save a shortlist so you need not re-query
   notebook_list() / notebook_read(index)
@@ -316,7 +360,27 @@ A suggested order:
      usable ground option, reorder the cities or swap one out rather than
      forcing it.
   3. Per chosen city: attractions, restaurants, accommodations. Filter them by
-     the constraints you wrote in phase 1 rather than eyeballing the rows.
+     the constraints you wrote in phase 1 rather than eyeballing the rows,
+     then choose within what survives. A wish phrased as "as low as possible",
+     "the highest", "prefer cheaper", "prefer better rated" is not met by any
+     legal pick -- it asks for the best one available. Sort the filtered pool
+     on that field, or ask aggregate_items for the bound, and pick against it.
+     A plan that clears every threshold and then takes a middling value on an
+     optimisation still loses that preference. If a phase-1 check left a bound
+     as a constant, this is where you learn the real value, and one rule covers
+     every shape of it: order the pool the way you are optimising, keep the k
+     items you will actually use, and aggregate those k. Over four nights the
+     best reachable worst rating is the FOURTH best, not the best; over nine
+     meals the lowest reachable dearest meal is the ninth cheapest, not the
+     cheapest; the lowest reachable average is the mean of the nine cheapest,
+     not the mean of the pool. Only at k = 1 do these coincide with the pool.
+     aggregate_items does it in one call -- `sort_by` the field, `desc` when
+     you want the high end, `limit` k, and the `op` you were asked for:
+
+         aggregate_items(entity="accommodations", city="Waco", field="rating",
+                         op="min", desc=true, limit=4)
+
+     Note the figure; you can correct the check during verification.
   4. Per leg: search_flights on that leg's date, and get_ground_transport for
      both self-driving and taxi.
   5. notebook_write your shortlist per city and per leg as you go.
@@ -366,12 +430,14 @@ change. Rules:
 REVISE_AVAILABLE = """
 If one of your own checks is at fault rather than the plan -- it crashed, it
 tests the wrong thing, or you can now see your phase-1 reading of the request
-was off -- call revise_checks with just the ids you are changing and a one-line
-reason. Verification then re-runs on the same plan against the corrected checks,
-without spending a repair round.
+was off, or it carries a bound you have since measured -- call revise_checks
+with just the ids you are changing and a one-line reason. Verification then
+re-runs on the same plan against the corrected checks, without spending a
+repair round.
 
-Use it for the check, not for the plan. A check that currently passes cannot be
-rewritten, so this cannot be used to make a failing plan pass.
+Use it for the check, not for the plan. Every revision is recorded against the
+version it replaced, so correct a check that is wrong -- do not loosen one that
+is right.
 
 """
 
