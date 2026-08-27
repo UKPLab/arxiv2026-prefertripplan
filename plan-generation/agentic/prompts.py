@@ -178,10 +178,19 @@ constraints the request states, and one or two preferences.
 
 The logic behind a constraint may be multi-hop: a value may have to be derived
 before it can be compared, or the answer may depend on several entities across
-several days, or one condition may only apply where another already holds. Work 
+several days, or one condition may only apply where another already holds. Work
 it through now rather than gesturing at it -- the pseudocode is the record someone
-else would check the plan by. Where you are unsure, still commit to the most
-confident, concise form you can rather than hedging.
+else would check the plan by.
+
+Separate the logic from the form it is written in. The LOGIC -- what the
+constraint actually demands, across all three kinds above -- should be the most
+confident and concise reading you can commit to on the information you have and
+your understanding of the request; do not hedge it into something vaguer than
+you believe. The FORM -- how the check reaches the values it needs out of the
+plan and ctx -- should be as defensive as you like: guard a length before you
+index it, default a key that may be absent, tolerate a shape you are not sure
+of. Being certain about what you test costs nothing in caution about how you
+reach it.
 
 Trip request:
 {query}"""

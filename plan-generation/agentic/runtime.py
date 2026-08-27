@@ -22,6 +22,7 @@ import json
 import re
 import threading
 import time
+from functools import lru_cache
 from dataclasses import dataclass, field
 
 import _paths  # noqa: F401
@@ -162,6 +163,57 @@ class OracleVerdict:
         if isinstance(self.budget, (int, float)):
             return f"{msg} That is within your stated budget of {self.budget}."
         return msg
+
+
+@lru_cache(maxsize=8)
+def _synthetic_days(days: int) -> list[dict]:
+    """A well-formed plan of `days` days, naming entities that really resolve.
+
+    Pre-flight only asks whether a check RAISES, never what it returns, so the
+    cities and names here are immaterial -- what matters is that `resolve_plan`
+    can attach every attribute, so a check reaching for `cost` or `rating` or
+    `minimum_nights` meets the shape it will meet on a real plan. Invented
+    names would resolve to `found: False` with those keys absent, which trades
+    one spurious failure for another.
+
+    Deliberately NOT the agent's draft: smoke-running on the draft would let a
+    check be written, or silently tuned, to the plan it will judge.
+    """
+    pair = None
+    for city in _synth_cities():
+        r, a, h = (T.search_restaurants(city), T.search_attractions(city),
+                   T.search_accommodations(city))
+        if len(r) >= 3 and a and h:
+            pair = (city, r, a, h)
+            break
+    if pair is None:                      # no city is fully populated; shape-only
+        return [{"days": d, "current_city": "Somewhere", "transportation": "-",
+                 "breakfast": "-", "attraction": "-", "lunch": "-",
+                 "dinner": "-", "accommodation": "-"} for d in range(1, days + 1)]
+    city, r, a, h = pair
+    out = []
+    for d in range(1, days + 1):
+        out.append({
+            "days": d, "current_city": city, "transportation": "-",
+            "breakfast": f"{r[0]['name']}, {city}",
+            "lunch": f"{r[1]['name']}, {city}",
+            "dinner": f"{r[2]['name']}, {city}",
+            "attraction": f"{a[0]['name']}, {city}",
+            # the last day carries no stay, as every real plan's does not
+            "accommodation": "-" if d == days else f"{h[0]['name']}, {city}",
+        })
+    return out
+
+
+@lru_cache(maxsize=1)
+def _synth_cities() -> tuple[str, ...]:
+    """Candidate cities for the pre-flight fixture, in a fixed order."""
+    seen = []
+    for state in sorted(T._get("cities")):
+        for c in T._get("cities")[state]:
+            if c not in seen:
+                seen.append(c)
+    return tuple(seen)
 
 
 def evaluate_with_oracle(plan_days: list[dict], people: int, *,
@@ -427,7 +479,8 @@ class Runner:
                           P.spec_python(self.spec.pseudocode_block()), None)
         self._push_assistant(turn)
         V.attach_python_turn(self.spec, turn.text)
-        V.preflight(self.spec, self._ctx(), timeout=self.b.verifier_exec_timeout)
+        V.preflight(self.spec, self._preflight_ctx(),
+                    timeout=self.b.verifier_exec_timeout)
         self.traj.spec_json = self.spec.to_json()
         self.traj.verifier_mode = self.spec.mode()
         self.traj.verifier_coverage = self.spec.coverage()
@@ -452,6 +505,23 @@ class Runner:
         # anyway (an appended "; Cost: ..." breaks the grader's city parse).
         ctx["items"] = (T.resolve_plan(self._convert(self._plan))
                         if (self._plan and self._convert) else [])
+        return ctx
+
+    def _preflight_ctx(self) -> dict:
+        """The same ctx, but with `items` describing a synthetic plan.
+
+        Pre-flight tests a check against a plan the agent did not write, so it
+        cannot be tuned to the itinerary it will judge. That plan was being
+        built, but `items` was left EMPTY -- so a check received three days of
+        `plan` alongside zero resolved entities, a state that never occurs at
+        verification time. Anything indexing `ctx["items"][0]` raised
+        IndexError and was written off as unusable: twelve of twenty-nine
+        checks on one run, once the model stopped writing length guards.
+        Resolving the synthetic plan makes the two agree.
+        """
+        ctx = dict(self.spec.ctx()) if self.spec else {}
+        days = int(ctx.get("days") or 3)
+        ctx["items"] = T.resolve_plan(_synthetic_days(days))
         return ctx
 
     # -- phase 2-3: TOOL USE / CONSTRUCT -----------------------------------
@@ -813,7 +883,8 @@ class Runner:
                 shadowed.append(cid)
             c.python = src
             applied.append(cid)
-        V.preflight(self.spec, self._ctx(), timeout=self.b.verifier_exec_timeout)
+        V.preflight(self.spec, self._preflight_ctx(),
+                    timeout=self.b.verifier_exec_timeout)
         n_applied = len(applied) + len(added)
         rev = {"round": rnd, "trigger": "agent_requested",
                "reason": str(args.get("reason", ""))[:200],
