@@ -46,8 +46,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The TravelPlanner CSV / JSONL sources live under `database/` (accommodations, restaurants, attractions, flights, distance matrix, city↔state mapping). The base test queries are `database/travelplanner_test.jsonl` and are used verbatim — the augmenter only ADDS fields, never mutates the original query facts.
+The TravelPlanner CSV / JSONL sources live under `database/` (accommodations, restaurants, attractions, flights, distance matrix, city↔state mapping). The base test queries are `database/travelplanner_test.jsonl` and are used verbatim — the augmenter only adds fields, never mutates the original query facts. `database.zip` is hosted alongside the dataset splits on the [UKPLab/PreferTripPlan](https://huggingface.co/datasets/UKPLab/PreferTripPlan) HuggingFace repo. Download and unpack `database.zip` into the project root before running anything:
 
+```bash
+wget https://huggingface.co/datasets/UKPLab/PreferTripPlan/resolve/main/database.zip
+mkdir -p database
+unzip database.zip -d database
+```
 
 ## Usage
 

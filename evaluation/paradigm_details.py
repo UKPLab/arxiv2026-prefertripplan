@@ -1768,6 +1768,12 @@ def extract_suppression_index(records: list[dict]) -> dict[str, Any]:
                 "n_entities": len(ents), "values": values,
                 "drifted": drifted, "surviving": surviving,
                 "drifted_mean": d_mean, "surviving_mean": s_mean,
+                # Per-member realization counts, exposed alongside the
+                # arm means so downstream analyses can renormalise each
+                # member (e.g. by pool availability) instead of
+                # re-deriving the whole extraction.  Keys are the leaf's
+                # own value literals.
+                "realized": dict(real),
                 "si": d_mean / s_mean,
                 "action": (next(iter(acts)) if len(acts) == 1 else "mixed"),
             })
@@ -1801,6 +1807,10 @@ def extract_suppression_index(records: list[dict]) -> dict[str, Any]:
                          if any(x["op"] == o and x["action"] == a for x in leaves)},
         "by_attribute": grp("attribute"),
         "by_paradigm": grp("paradigm"),
+        # Per-leaf detail, exposed so downstream analyses can renormalise
+        # SI without reimplementing the extraction (see
+        # evaluation/suppression/).  Aggregates above are unchanged.
+        "leaves": leaves,
         "counts": dict(counts),
         "examples": sorted(leaves, key=lambda x: x["si"])[:8],
     }
